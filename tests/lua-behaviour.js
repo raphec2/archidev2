@@ -1,13 +1,13 @@
-// Run the *pure* helper functions from wezterm/archidev-flow.lua in a real
+// Run the *pure* helper functions from wezterm/archidev2.lua in a real
 // Lua VM (fengari) and assert their behaviour. No wezterm needed.
 //
 // Optional: the repository itself has no dependencies. To enable this check,
 // install the two parsers somewhere temporary and point tests/run-tests at it:
 //
 //   d=$(mktemp -d); (cd "$d" && npm install luaparse fengari)
-//   ADF_NODE_MODULES=$d ./tests/run-tests
+//   AD2_NODE_MODULES=$d ./tests/run-tests
 //
-// Usage: node tests/lua-behaviour.js wezterm/archidev-flow.lua
+// Usage: node tests/lua-behaviour.js wezterm/archidev2.lua
 const fs = require('fs');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = require('fengari');
 

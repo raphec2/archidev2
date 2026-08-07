@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run-tests - non-GUI validation for ArchiDev-Flow.
+# run-tests - non-GUI validation for ArchiDev2.
 #
 # Everything here is safe: it works in temporary directories, never touches
 # the real user config, and never starts WezTerm.
@@ -16,14 +16,14 @@ ROOT=$(CDPATH= cd -P -- "$(dirname -- "$_self")/.." && pwd -P)
 
 # Sandbox: HOME and XDG_CONFIG_HOME are redirected for the whole run so no
 # test can reach the developer's real configuration.
-SANDBOX=$(mktemp -d -t archidev-tests.XXXXXX)
+SANDBOX=$(mktemp -d -t archidev2-tests.XXXXXX)
 trap 'rm -rf -- "$SANDBOX"' EXIT
 export HOME="$SANDBOX/home"
 export XDG_CONFIG_HOME="$SANDBOX/home/.config"
 mkdir -p "$HOME"
 
-# shellcheck source=../lib/archidev-lib.sh
-source "$ROOT/lib/archidev-lib.sh"
+# shellcheck source=../lib/ad2-lib.sh
+source "$ROOT/lib/ad2-lib.sh"
 
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
@@ -51,19 +51,19 @@ assert_not_contains() {
   fi
 }
 
-FLOW="$ROOT/bin/archidev-flow"
+FLOW="$ROOT/bin/archidev2"
 
 # ---------------------------------------------------------------------------
 note '1. Bash syntax'
 # ---------------------------------------------------------------------------
-for f in "$ROOT/bin/archidev-flow" "$ROOT/lib/archidev-lib.sh" \
-         "$ROOT/lib/archidev-pane" "$ROOT/scripts/check-dependencies" \
+for f in "$ROOT/bin/archidev2" "$ROOT/bin/archidev-flow" "$ROOT/lib/ad2-lib.sh" \
+         "$ROOT/lib/ad2-pane" "$ROOT/scripts/check-dependencies" \
          "$ROOT/tests/run-tests"; do
   if bash -n "$f" 2>/dev/null; then ok "syntax: ${f#"$ROOT/"}"
   else bad "syntax: ${f#"$ROOT/"}"; bash -n "$f"; fi
 done
 
-for f in "$ROOT/bin/archidev-flow" "$ROOT/lib/archidev-pane" \
+for f in "$ROOT/bin/archidev2" "$ROOT/bin/archidev-flow" "$ROOT/lib/ad2-pane" \
          "$ROOT/scripts/check-dependencies" "$ROOT/tests/run-tests"; do
   [[ -x $f ]] && ok "executable: ${f#"$ROOT/"}" || bad "executable: ${f#"$ROOT/"}"
 done
@@ -81,15 +81,15 @@ fi
 note '2. XDG config locations'
 # ---------------------------------------------------------------------------
 assert_eq 'config file honours XDG_CONFIG_HOME' \
-  "$XDG_CONFIG_HOME/archidev-flow/config" "$(adf_config_file)"
+  "$XDG_CONFIG_HOME/archidev2/config" "$(ad2_config_file)"
 
 ( export XDG_CONFIG_HOME=''
   assert_eq 'falls back to ~/.config when XDG_CONFIG_HOME is empty' \
-    "$HOME/.config/archidev-flow/config" "$(adf_config_file)" )
+    "$HOME/.config/archidev2/config" "$(ad2_config_file)" )
 
 ( export XDG_CONFIG_HOME='relative/path'
   assert_eq 'ignores a relative XDG_CONFIG_HOME (per spec)' \
-    "$HOME/.config/archidev-flow/config" "$(adf_config_file)" )
+    "$HOME/.config/archidev2/config" "$(ad2_config_file)" )
 
 # ---------------------------------------------------------------------------
 note '3. Config parsing'
@@ -105,11 +105,11 @@ DEVELOPER_COMMAND="claude"
 FILE_MANAGER_COMMAND=yazi
 EDITOR_COMMAND='micro'
 EOF
-adf_config_load "$cfg" 2>/dev/null
-assert_eq 'single-quoted value with spaces' '/tmp/dir with spaces' "$(adf_config_get CONSULTANT_DIR)"
-assert_eq 'whitespace around key and = trimmed' 'codex --model gpt-5' "$(adf_config_get CONSULTANT_COMMAND)"
-assert_eq 'double-quoted value' 'claude' "$(adf_config_get DEVELOPER_COMMAND)"
-assert_eq 'bare value' 'yazi' "$(adf_config_get FILE_MANAGER_COMMAND)"
+ad2_config_load "$cfg" 2>/dev/null
+assert_eq 'single-quoted value with spaces' '/tmp/dir with spaces' "$(ad2_config_get CONSULTANT_DIR)"
+assert_eq 'whitespace around key and = trimmed' 'codex --model gpt-5' "$(ad2_config_get CONSULTANT_COMMAND)"
+assert_eq 'double-quoted value' 'claude' "$(ad2_config_get DEVELOPER_COMMAND)"
+assert_eq 'bare value' 'yazi' "$(ad2_config_get FILE_MANAGER_COMMAND)"
 
 cfg2="$SANDBOX/cfg2"
 cat >"$cfg2" <<'EOF'
@@ -119,30 +119,30 @@ UNKNOWN_KEY=whatever
 9BAD=x
 noequalsign
 EOF
-# adf_config_load must run in *this* shell, so capture stderr via a file
-# instead of a command substitution (which would discard ADF_CONFIG).
-adf_config_load "$cfg2" 2>"$SANDBOX/warn2"
+# ad2_config_load must run in *this* shell, so capture stderr via a file
+# instead of a command substitution (which would discard AD2_CONFIG).
+ad2_config_load "$cfg2" 2>"$SANDBOX/warn2"
 warnings=$(cat "$SANDBOX/warn2")
 assert_eq 'shell metacharacters are never expanded' \
-  '/tmp/$HOME/`whoami`/$(id -u)/*' "$(adf_config_get CONSULTANT_DIR)"
+  '/tmp/$HOME/`whoami`/$(id -u)/*' "$(ad2_config_get CONSULTANT_DIR)"
 assert_contains 'unknown key warns' 'ignoring unknown key: UNKNOWN_KEY' "$warnings"
 assert_contains 'invalid key name warns' 'ignoring invalid key' "$warnings"
 assert_contains 'line without = warns' "ignoring line without '='" "$warnings"
-assert_eq 'unknown key is not stored' '' "$(adf_config_get UNKNOWN_KEY)"
+assert_eq 'unknown key is not stored' '' "$(ad2_config_get UNKNOWN_KEY)"
 
-adf_config_load "$SANDBOX/does-not-exist"
+ad2_config_load "$SANDBOX/does-not-exist"
 assert_rc 'missing config file is not an error' 0 $?
-assert_eq 'missing config yields no values' '' "$(adf_config_get CONSULTANT_DIR)"
+assert_eq 'missing config yields no values' '' "$(ad2_config_get CONSULTANT_DIR)"
 
 # ---------------------------------------------------------------------------
 note '4. Config writing (round-trip)'
 # ---------------------------------------------------------------------------
 roundtrip() { # <desc> <value>
   local desc=$1 value=$2 out="$SANDBOX/rt-$RANDOM"
-  ADF_CONFIG=(); ADF_CONFIG[CONSULTANT_DIR]=$value
-  adf_config_write "$out" || { bad "$desc (write failed)"; return; }
-  ADF_CONFIG=(); adf_config_load "$out" 2>/dev/null
-  assert_eq "$desc" "$value" "$(adf_config_get CONSULTANT_DIR)"
+  AD2_CONFIG=(); AD2_CONFIG[CONSULTANT_DIR]=$value
+  ad2_config_write "$out" || { bad "$desc (write failed)"; return; }
+  AD2_CONFIG=(); ad2_config_load "$out" 2>/dev/null
+  assert_eq "$desc" "$value" "$(ad2_config_get CONSULTANT_DIR)"
 }
 roundtrip 'round-trip: plain path'            '/home/u/consultant'
 roundtrip 'round-trip: spaces'                '/home/u/my consultant dir'
@@ -153,8 +153,8 @@ roundtrip 'round-trip: hash'                  '/tmp/a#b'
 roundtrip 'round-trip: unicode'               '/tmp/café/日本語'
 
 out="$SANDBOX/perm-test/config"
-ADF_CONFIG=(); ADF_CONFIG[CONSULTANT_DIR]='/tmp'
-adf_config_write "$out"
+AD2_CONFIG=(); AD2_CONFIG[CONSULTANT_DIR]='/tmp'
+ad2_config_write "$out"
 assert_eq 'written config is mode 0600' '600' "$(stat -c '%a' "$out")"
 assert_eq 'config directory is mode 0700' '700' "$(stat -c '%a' "$(dirname "$out")")"
 
@@ -162,17 +162,17 @@ assert_eq 'config directory is mode 0700' '700' "$(stat -c '%a' "$(dirname "$out
 note '5. Command splitting'
 # ---------------------------------------------------------------------------
 declare -a argv
-adf_split_command argv 'codex'
+ad2_split_command argv 'codex'
 assert_eq 'single word command'      'codex' "${argv[*]}"
 assert_eq 'single word arity'        '1' "${#argv[@]}"
-adf_split_command argv '  claude   --dangerously-skip-permissions  '
+ad2_split_command argv '  claude   --dangerously-skip-permissions  '
 assert_eq 'extra whitespace collapses' 'claude --dangerously-skip-permissions' "${argv[*]}"
 assert_eq 'argv arity'               '2' "${#argv[@]}"
-adf_split_command argv 'echo *'
+ad2_split_command argv 'echo *'
 assert_eq 'no globbing during split'  '*' "${argv[1]}"
-adf_split_command argv 'echo $HOME'
+ad2_split_command argv 'echo $HOME'
 assert_eq 'no expansion during split' '$HOME' "${argv[1]}"
-adf_split_command argv ''
+ad2_split_command argv ''
 assert_eq 'empty command yields no argv' '0' "${#argv[@]}"
 
 # ---------------------------------------------------------------------------
@@ -183,21 +183,21 @@ spaced="$SANDBOX/pro ject dir"; mkdir -p "$spaced"
 dashed="$SANDBOX/-dashy"; mkdir -p "$dashed"
 touch "$SANDBOX/afile"
 
-assert_eq 'absolute path resolves' "$proj" "$(adf_resolve_dir "$proj")"
-assert_eq 'path with spaces resolves' "$spaced" "$(adf_resolve_dir "$spaced")"
-assert_eq 'leading-dash path resolves' "$dashed" "$(adf_resolve_dir "$dashed")"
-assert_eq 'trailing slash normalised' "$proj" "$(adf_resolve_dir "$proj/")"
-assert_eq 'dot-dot normalised' "$proj" "$(adf_resolve_dir "$proj/sub/..")"
-( cd "$proj/sub" && assert_eq 'relative "." resolves' "$proj/sub" "$(adf_resolve_dir .)" )
-( cd "$proj/sub" && assert_eq 'relative ".." resolves' "$proj" "$(adf_resolve_dir ..)" )
+assert_eq 'absolute path resolves' "$proj" "$(ad2_resolve_dir "$proj")"
+assert_eq 'path with spaces resolves' "$spaced" "$(ad2_resolve_dir "$spaced")"
+assert_eq 'leading-dash path resolves' "$dashed" "$(ad2_resolve_dir "$dashed")"
+assert_eq 'trailing slash normalised' "$proj" "$(ad2_resolve_dir "$proj/")"
+assert_eq 'dot-dot normalised' "$proj" "$(ad2_resolve_dir "$proj/sub/..")"
+( cd "$proj/sub" && assert_eq 'relative "." resolves' "$proj/sub" "$(ad2_resolve_dir .)" )
+( cd "$proj/sub" && assert_eq 'relative ".." resolves' "$proj" "$(ad2_resolve_dir ..)" )
 
-adf_resolve_dir "$SANDBOX/nope" >/dev/null 2>&1; assert_rc 'missing dir -> rc 3' 3 $?
-adf_resolve_dir "$SANDBOX/afile" >/dev/null 2>&1; assert_rc 'file, not a dir -> rc 4' 4 $?
-adf_resolve_dir '' >/dev/null 2>&1; assert_rc 'empty path -> rc 2' 2 $?
+ad2_resolve_dir "$SANDBOX/nope" >/dev/null 2>&1; assert_rc 'missing dir -> rc 3' 3 $?
+ad2_resolve_dir "$SANDBOX/afile" >/dev/null 2>&1; assert_rc 'file, not a dir -> rc 4' 4 $?
+ad2_resolve_dir '' >/dev/null 2>&1; assert_rc 'empty path -> rc 2' 2 $?
 
 if [[ $(id -u) -ne 0 ]]; then
   noread="$SANDBOX/noread"; mkdir -p "$noread"; chmod 000 "$noread"
-  adf_resolve_dir "$noread" >/dev/null 2>&1; assert_rc 'unreadable dir -> rc 5' 5 $?
+  ad2_resolve_dir "$noread" >/dev/null 2>&1; assert_rc 'unreadable dir -> rc 5' 5 $?
   chmod 755 "$noread"
 else
   printf '  \033[2mskip\033[0m permission test (running as root)\n'
@@ -205,7 +205,7 @@ fi
 
 # CDPATH must not be able to redirect resolution.
 ( export CDPATH="$SANDBOX"; cd "$proj" || exit
-  assert_eq 'CDPATH is neutralised' "$proj/sub" "$(adf_resolve_dir sub)" )
+  assert_eq 'CDPATH is neutralised' "$proj/sub" "$(ad2_resolve_dir sub)" )
 
 # ---------------------------------------------------------------------------
 note '7. Launcher: argument handling'
@@ -217,9 +217,9 @@ run_flow() { o=$("$@" 2>&1); RC=$?; }
 run_flow "$FLOW" --help; assert_rc '--help exits 0' 0 $RC
 assert_contains '--help mentions usage' 'Usage:' "$o"
 run_flow "$FLOW" --version; assert_rc '--version exits 0' 0 $RC
-assert_contains '--version prints a version' 'archidev-flow 0.' "$o"
+assert_contains '--version prints a version' 'archidev2 0.' "$o"
 run_flow "$FLOW" --print-config-path
-assert_eq '--print-config-path matches library' "$(adf_config_file)" "$o"
+assert_eq '--print-config-path matches library' "$(ad2_config_file)" "$o"
 run_flow "$FLOW" --bogus; assert_rc 'unknown option -> rc 2' 2 $RC
 assert_contains 'unknown option explains itself' 'unknown option' "$o"
 run_flow "$FLOW" a b; assert_rc 'two project args -> rc 2' 2 $RC
@@ -247,14 +247,14 @@ assert_contains 'dry-run shows the consultant dir' "$(printf '%q' "$consult")" "
 assert_contains 'dry-run shows consultant argv' 'codex --model gpt-5' "$o"
 assert_contains 'dry-run shows developer argv' 'claude' "$o"
 assert_contains 'dry-run says nothing launched' 'nothing was launched' "$o"
-assert_contains 'dry-run names the wezterm config' 'archidev-flow.lua' "$o"
+assert_contains 'dry-run names the wezterm config' 'archidev2.lua' "$o"
 
 # --dry-run must not leak unrelated environment or secrets.
-export ARCHIDEV_TEST_SECRET='super-secret-token'
+export ARCHIDEV2_TEST_SECRET='super-secret-token'
 run_flow "$FLOW" --dry-run --config "$dcfg" "$proj"
 assert_not_contains 'dry-run does not dump the environment' 'super-secret-token' "$o"
 assert_not_contains 'dry-run does not print API keys' 'API_KEY' "$o"
-unset ARCHIDEV_TEST_SECRET
+unset ARCHIDEV2_TEST_SECRET
 
 run_flow "$FLOW" --dry-run --config "$dcfg" "$spaced"
 assert_rc 'dry-run: project path with spaces exits 0' 0 $RC
@@ -334,7 +334,7 @@ if command -v python3 >/dev/null 2>&1; then
 if [ "$1" = "start" ] && [ "$2" = "--help" ]; then
   echo "      --always-new-process"; exit 0
 fi
-{ echo "ARGV: $*"; env | grep '^ARCHIDEV_' | sort; } >"$WEZ_STUB_OUT"
+{ echo "ARGV: $*"; env | grep '^ARCHIDEV2_' | sort; } >"$WEZ_STUB_OUT"
 STUB
   chmod +x "$fakebin/wezterm"
 
@@ -359,14 +359,14 @@ PYEOF
   assert_contains 'first run reports where it saved the setting' \
     'Saved CONSULTANT_DIR' "$pty_out"
 
-  pty_cfg="$pty_home/.config/archidev-flow/config"
+  pty_cfg="$pty_home/.config/archidev2/config"
   if [[ -f $pty_cfg ]]; then
     ok 'first run wrote the config'
     assert_eq 'first-run config is mode 0600' '600' "$(stat -c '%a' "$pty_cfg")"
-    ADF_CONFIG=(); adf_config_load "$pty_cfg" 2>/dev/null
+    AD2_CONFIG=(); ad2_config_load "$pty_cfg" 2>/dev/null
     assert_eq 'first run saved the accepted directory' \
-      "$pty_home/archidev-consultant" "$(adf_config_get CONSULTANT_DIR)"
-    [[ -d "$pty_home/archidev-consultant" ]] \
+      "$pty_home/archidev2-consultant" "$(ad2_config_get CONSULTANT_DIR)"
+    [[ -d "$pty_home/archidev2-consultant" ]] \
       && ok 'first run created the consultant directory' \
       || bad 'first run created the consultant directory'
   else
@@ -379,16 +379,16 @@ PYEOF
     ok 'launcher execs wezterm'
     assert_contains 'wezterm gets our project-owned config file' \
       '--config-file' "$w"
-    assert_contains 'wezterm gets archidev-flow.lua' 'archidev-flow.lua' "$w"
+    assert_contains 'wezterm gets archidev2.lua' 'archidev2.lua' "$w"
     assert_contains 'wezterm is asked for a fresh process' '--always-new-process' "$w"
     assert_contains 'project dir passed to wezterm' \
-      "ARCHIDEV_PROJECT_DIR=$pty_home/proj" "$w"
+      "ARCHIDEV2_PROJECT_DIR=$pty_home/proj" "$w"
     assert_contains 'consultant dir passed to wezterm' \
-      "ARCHIDEV_CONSULTANT_DIR=$pty_home/archidev-consultant" "$w"
-    assert_contains 'consultant argv passed to wezterm' 'ARCHIDEV_CONSULTANT_ARGV=codex' "$w"
-    assert_contains 'developer argv passed to wezterm' 'ARCHIDEV_DEVELOPER_ARGV=claude' "$w"
-    assert_contains 'pane runner passed to wezterm' 'ARCHIDEV_PANE_RUNNER=' "$w"
-    assert_contains 'workspace name is per-launch' 'ARCHIDEV_WORKSPACE=archidev-proj-' "$w"
+      "ARCHIDEV2_CONSULTANT_DIR=$pty_home/archidev2-consultant" "$w"
+    assert_contains 'consultant argv passed to wezterm' 'ARCHIDEV2_CONSULTANT_ARGV=codex' "$w"
+    assert_contains 'developer argv passed to wezterm' 'ARCHIDEV2_DEVELOPER_ARGV=claude' "$w"
+    assert_contains 'pane runner passed to wezterm' 'ARCHIDEV2_PANE_RUNNER=' "$w"
+    assert_contains 'workspace name is per-launch' 'ARCHIDEV2_WORKSPACE=archidev2-proj-' "$w"
   else
     bad 'launcher execs wezterm'
   fi
@@ -400,7 +400,7 @@ fi
 # ---------------------------------------------------------------------------
 note '10. Real user config untouched'
 # ---------------------------------------------------------------------------
-[[ ! -e "$XDG_CONFIG_HOME/archidev-flow/config" ]] \
+[[ ! -e "$XDG_CONFIG_HOME/archidev2/config" ]] \
   && ok 'no config created in the sandboxed XDG dir by dry runs' \
   || bad 'a dry run created a config file'
 
@@ -429,25 +429,25 @@ assert_contains '--check-deps runs the dependency script' 'dependency check' "$o
 # ---------------------------------------------------------------------------
 note '12. Pane runner'
 # ---------------------------------------------------------------------------
-PANE="$ROOT/lib/archidev-pane"
-o=$(SHELL=/bin/true ARCHIDEV_SESSION_ID=test "$PANE" consultant echo hello 2>&1)
+PANE="$ROOT/lib/ad2-pane"
+o=$(SHELL=/bin/true ARCHIDEV2_SESSION_ID=test "$PANE" consultant echo hello 2>&1)
 assert_contains 'pane runner runs its command' 'hello' "$o"
-assert_contains 'pane runner tags the pane role (OSC 1337 user var)' 'SetUserVar=ARCHIDEV_ROLE=' "$o"
+assert_contains 'pane runner tags the pane role (OSC 1337 user var)' 'SetUserVar=ARCHIDEV2_ROLE=' "$o"
 assert_contains 'pane runner base64-encodes the role' "$(printf 'consultant' | base64)" "$o"
-assert_contains 'pane runner sets a window title' 'ArchiDev Consultant' "$o"
-assert_contains 'pane runner survives command exit' 'exited with status 0' "$o"
+assert_contains 'pane runner sets a window title' 'ArchiDev2 CONSULTANT' "$o"
+assert_contains 'pane runner survives command exit' 'CONSULTANT exited (status 0)' "$o"
 
 o=$(SHELL=/bin/true "$PANE" developer definitely-not-a-command-xyz 2>&1)
 assert_contains 'pane runner reports a missing command' 'command not found' "$o"
-assert_contains 'pane runner keeps the pane after a missing command' 'exited with status 127' "$o"
+assert_contains 'pane runner keeps the pane after a missing command' 'DEVELOPER exited (status 127)' "$o"
 
 o=$(SHELL=/bin/true "$PANE" consultant sh -c 'exit 3' 2>&1)
-assert_contains 'pane runner reports a non-zero exit' 'exited with status 3' "$o"
+assert_contains 'pane runner reports a non-zero exit' 'CONSULTANT exited (status 3)' "$o"
 
-o=$(SHELL=/bin/true ARCHIDEV_EDITOR_COMMAND=micro "$PANE" files sh -c 'echo EDITOR=$EDITOR VISUAL=$VISUAL' 2>&1)
+o=$(SHELL=/bin/true ARCHIDEV2_EDITOR_COMMAND=micro "$PANE" files sh -c 'echo EDITOR=$EDITOR VISUAL=$VISUAL' 2>&1)
 assert_contains 'files pane exports EDITOR' 'EDITOR=micro' "$o"
 assert_contains 'files pane exports VISUAL' 'VISUAL=micro' "$o"
-o=$(SHELL=/bin/true ARCHIDEV_EDITOR_COMMAND= "$PANE" files sh -c 'echo EDITOR=$EDITOR' 2>&1)
+o=$(SHELL=/bin/true ARCHIDEV2_EDITOR_COMMAND= "$PANE" files sh -c 'echo EDITOR=$EDITOR' 2>&1)
 assert_contains 'files pane falls back to an installed editor' 'EDITOR=' "$o"
 o=$(SHELL=/bin/true "$PANE" consultant sh -c 'echo EDITOR=[$EDITOR]' 2>&1)
 assert_contains 'non-files panes do not get EDITOR forced' 'EDITOR=[]' "$o"
@@ -455,7 +455,7 @@ assert_contains 'non-files panes do not get EDITOR forced' 'EDITOR=[]' "$o"
 # ---------------------------------------------------------------------------
 note '13. WezTerm Lua config'
 # ---------------------------------------------------------------------------
-LUA="$ROOT/wezterm/archidev-flow.lua"
+LUA="$ROOT/wezterm/archidev2.lua"
 [[ -r $LUA ]] && ok 'lua config exists' || bad 'lua config exists'
 
 lua_checked=0
@@ -479,10 +479,10 @@ for luabin in luac5.4 luac5.3 luac luajit lua5.4 lua5.3 lua; do
   fi
 done
 # Optional node-based checkers. The repository has no dependencies of its own;
-# point ADF_NODE_MODULES at a scratch dir where you ran
+# point AD2_NODE_MODULES at a scratch dir where you ran
 #   npm install luaparse fengari
-if [[ -n ${ADF_NODE_MODULES:-} ]] && command -v node >/dev/null 2>&1; then
-  export NODE_PATH="$ADF_NODE_MODULES/node_modules"
+if [[ -n ${AD2_NODE_MODULES:-} ]] && command -v node >/dev/null 2>&1; then
+  export NODE_PATH="$AD2_NODE_MODULES/node_modules"
   if [[ -d $NODE_PATH/luaparse ]]; then
     o=$(node -e '
       const fs=require("fs"), luaparse=require("luaparse");
@@ -504,7 +504,7 @@ if [[ -n ${ADF_NODE_MODULES:-} ]] && command -v node >/dev/null 2>&1; then
     lua_checked=1
   fi
 fi
-(( lua_checked )) || printf '  \033[2mskip\033[0m no Lua checker available (install wezterm or lua, or set ADF_NODE_MODULES)\n'
+(( lua_checked )) || printf '  \033[2mskip\033[0m no Lua checker available (install wezterm or lua, or set AD2_NODE_MODULES)\n'
 
 # Cheap invariants that do not need a Lua runtime.
 grep -q 'send_paste' "$LUA" && ok 'lua uses paste semantics (send_paste)' || bad 'lua uses paste semantics'
@@ -522,10 +522,371 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+note '15. Legacy config migration'
+# ---------------------------------------------------------------------------
+# The old prototype wrote ~/.config/archidev-flow/config. That directory is
+# SHARED with the old ArchiDev-Flow Electron app, so migration must read one
+# file and touch nothing else.
+
+mk_legacy() { # <dir> -> creates a realistic legacy dir with decoy Electron files
+  local d=$1
+  mkdir -p "$d/workspaces/ws1" "$d/Cache"
+  printf "# ArchiDev-Flow configuration\nCONSULTANT_DIR='%s'\nDEVELOPER_COMMAND='claude'\n" \
+    "$consult" >"$d/config"
+  chmod 0640 "$d/config"
+  printf 'electron-cookies' >"$d/Cookies"
+  printf 'notes' >"$d/notes.md"
+  printf '{"legacy":true}' >"$d/config.legacy.json"
+}
+
+# --- old exists, new missing -> migrate ---
+m1="$SANDBOX/m1"; mkdir -p "$m1"
+mk_legacy "$m1/archidev-flow"
+AD2_CONFIG=()
+ad2_migrate_legacy_config "$m1/archidev2/config" "$m1/archidev-flow/config" 2>"$SANDBOX/m1.log"
+assert_rc 'migrate: old present + new missing -> migrates' 0 $?
+[[ -f "$m1/archidev2/config" ]] && ok 'migrate: new config created' || bad 'migrate: new config created'
+AD2_CONFIG=(); ad2_config_load "$m1/archidev2/config" 2>/dev/null
+assert_eq 'migrate: CONSULTANT_DIR carried across' "$consult" "$(ad2_config_get CONSULTANT_DIR)"
+assert_eq 'migrate: DEVELOPER_COMMAND carried across' 'claude' "$(ad2_config_get DEVELOPER_COMMAND)"
+assert_eq 'migrate: permissions preserved from the old file' '640' "$(stat -c '%a' "$m1/archidev2/config")"
+assert_eq 'migrate: new config dir is 0700' '700' "$(stat -c '%a' "$m1/archidev2")"
+assert_contains 'migrate: reports what it did' 'migrated settings from the previous prototype' "$(cat "$SANDBOX/m1.log")"
+assert_contains 'migrate: names the source file' "$m1/archidev-flow/config" "$(cat "$SANDBOX/m1.log")"
+assert_contains 'migrate: says the old file was kept' 'left untouched' "$(cat "$SANDBOX/m1.log")"
+assert_not_contains 'migrate: new file has no old product name' 'ArchiDev-Flow' "$(cat "$m1/archidev2/config")"
+
+# nothing in the shared legacy directory may be removed or altered
+[[ -f "$m1/archidev-flow/config" ]] && ok 'migrate: old config not deleted' || bad 'migrate: old config not deleted'
+assert_eq 'migrate: old config unchanged' '640' "$(stat -c '%a' "$m1/archidev-flow/config")"
+assert_contains 'migrate: old config content intact' 'ArchiDev-Flow configuration' "$(cat "$m1/archidev-flow/config")"
+for decoy in Cookies notes.md config.legacy.json workspaces/ws1 Cache; do
+  [[ -e "$m1/archidev-flow/$decoy" ]] && ok "migrate: left '$decoy' alone" || bad "migrate: left '$decoy' alone"
+done
+
+# --- both exist -> never overwrite ---
+m2="$SANDBOX/m2"; mkdir -p "$m2/archidev2"
+mk_legacy "$m2/archidev-flow"
+printf "CONSULTANT_DIR='/keep/me'\n" >"$m2/archidev2/config"
+chmod 0600 "$m2/archidev2/config"
+before=$(cat "$m2/archidev2/config")
+AD2_CONFIG=()
+ad2_migrate_legacy_config "$m2/archidev2/config" "$m2/archidev-flow/config" 2>/dev/null
+assert_rc 'migrate: both exist -> does nothing (rc 1)' 1 $?
+assert_eq 'migrate: existing ArchiDev2 config untouched' "$before" "$(cat "$m2/archidev2/config")"
+
+# --- neither exists -> nothing to do ---
+m3="$SANDBOX/m3"; mkdir -p "$m3"
+AD2_CONFIG=()
+ad2_migrate_legacy_config "$m3/archidev2/config" "$m3/archidev-flow/config" 2>/dev/null
+assert_rc 'migrate: neither exists -> nothing to do (rc 1)' 1 $?
+[[ -e "$m3/archidev2/config" ]] && bad 'migrate: creates nothing when there is nothing' \
+  || ok 'migrate: creates nothing when there is nothing'
+
+# --- legacy file with no recognised keys -> nothing to do ---
+m4="$SANDBOX/m4"; mkdir -p "$m4/archidev-flow"
+printf '# just a comment\nSOMETHING_ELSE=1\n' >"$m4/archidev-flow/config"
+AD2_CONFIG=()
+ad2_migrate_legacy_config "$m4/archidev2/config" "$m4/archidev-flow/config" 2>/dev/null
+assert_rc 'migrate: legacy file with no usable keys -> rc 1' 1 $?
+[[ -e "$m4/archidev2/config" ]] && bad 'migrate: no empty config written' || ok 'migrate: no empty config written'
+
+# --- a legacy *directory* where the config file should be is not fatal ---
+m5="$SANDBOX/m5"; mkdir -p "$m5/archidev-flow/config"
+AD2_CONFIG=()
+ad2_migrate_legacy_config "$m5/archidev2/config" "$m5/archidev-flow/config" 2>/dev/null
+assert_rc 'migrate: legacy path that is a directory -> rc 1' 1 $?
+
+# --- end to end through the launcher, and --no-migrate ---
+m6="$SANDBOX/m6"; mkdir -p "$m6"
+mk_legacy "$m6/archidev-flow"
+XDG_CONFIG_HOME="$m6" run_flow "$FLOW" --dry-run "$proj"
+assert_rc 'launcher: migrates then launches normally' 0 "$RC"
+assert_contains 'launcher: reports the migration' 'migrated settings' "$o"
+[[ -f "$m6/archidev2/config" ]] && ok 'launcher: wrote the migrated config' || bad 'launcher: wrote the migrated config'
+
+m7="$SANDBOX/m7"; mkdir -p "$m7"
+mk_legacy "$m7/archidev-flow"
+XDG_CONFIG_HOME="$m7" run_flow "$FLOW" --dry-run --no-migrate --consultant-dir "$consult" "$proj"
+[[ -e "$m7/archidev2/config" ]] && bad '--no-migrate skips migration' || ok '--no-migrate skips migration'
+AD2_CONFIG=()
+
+# ---------------------------------------------------------------------------
+note '16. Key binding specs'
+# ---------------------------------------------------------------------------
+for spec in 'ALT|SHIFT c' 'CTRL|ALT|SHIFT d' 'ALT Enter' 'NONE F5' 'SUPER k' \
+            'CTRL|SHIFT PageUp' 'ALT 1' 'ALT LeftArrow'; do
+  ad2_valid_keyspec "$spec" && ok "keyspec accepted: $spec" || bad "keyspec accepted: $spec"
+done
+for spec in 'ALT' 'c' '' 'BOGUS c' 'ALT|BOGUS c' 'ALT cc' 'ALT F99' \
+            'ALT $(touch /tmp/pwn)' 'ALT ;rm -rf /' 'ALT|SHIFT' 'alt c'; do
+  ad2_valid_keyspec "$spec" && bad "keyspec rejected: '$spec'" || ok "keyspec rejected: '$spec'"
+done
+
+assert_eq 'keyspec label: modifiers and case' 'Alt+Shift+C' "$(ad2_keyspec_label 'ALT|SHIFT c')"
+assert_eq 'keyspec label: three modifiers'    'Ctrl+Alt+Shift+D' "$(ad2_keyspec_label 'CTRL|ALT|SHIFT d')"
+assert_eq 'keyspec label: named key'          'Alt+Enter' "$(ad2_keyspec_label 'ALT Enter')"
+assert_eq 'keyspec label: no modifiers'       'F5' "$(ad2_keyspec_label 'NONE F5')"
+
+for b in Right Middle off; do
+  ad2_valid_mouse_button "$b" && ok "mouse button accepted: $b" || bad "mouse button accepted: $b"
+done
+for b in Left right 'Right; rm' ''; do
+  ad2_valid_mouse_button "$b" && bad "mouse button rejected: '$b'" || ok "mouse button rejected: '$b'"
+done
+
+for v in 0.2 0.5 0.60 1.0 1 .75; do
+  ad2_valid_brightness "$v" && ok "brightness accepted: $v" || bad "brightness accepted: $v"
+done
+for v in 0.1 1.5 -0.5 abc '' '0.5; rm'; do
+  ad2_valid_brightness "$v" && bad "brightness rejected: '$v'" || ok "brightness rejected: '$v'"
+done
+
+# Invalid values in a real config must warn and fall back, never break launch.
+kcfg="$SANDBOX/keys.config"
+{ printf "CONSULTANT_DIR='%s'\n" "$consult"
+  printf "KEY_SEND_SELECTION_CONSULTANT='ALT|SHIFT x'\n"
+  printf "KEY_SEND_SELECTION_DEVELOPER='NOPE y'\n"
+  printf "MOUSE_MENU_BUTTON='Middle'\n"
+  printf "INACTIVE_PANE_BRIGHTNESS='9.9'\n"; } >"$kcfg"
+run_flow "$FLOW" --dry-run --config "$kcfg" "$proj"
+assert_rc 'bad key specs still launch' 0 "$RC"
+assert_contains 'valid custom binding is used' 'ALT|SHIFT x' "$o"
+assert_contains 'invalid binding warns' 'not a valid key spec' "$o"
+assert_contains 'invalid binding falls back to default' 'ALT|SHIFT d' "$o"
+assert_contains 'mouse button honoured' 'MOUSE_MENU_BUTTON' "$o"
+assert_contains 'mouse button value shown' 'Middle' "$o"
+assert_contains 'bad brightness warns' 'INACTIVE_PANE_BRIGHTNESS' "$o"
+assert_contains 'dry-run renders human-readable labels' 'Alt+Shift+X' "$o"
+
+# ---------------------------------------------------------------------------
+note '17. Compatibility shim'
+# ---------------------------------------------------------------------------
+SHIM="$ROOT/bin/archidev-flow"
+o=$("$SHIM" --version 2>&1); RC=$?
+assert_rc 'shim exits 0' 0 "$RC"
+assert_contains 'shim delegates to archidev2' 'archidev2 0.' "$o"
+assert_contains 'shim warns that it is deprecated' 'deprecated' "$o"
+o=$("$SHIM" --dry-run --config "$dcfg" "$proj" 2>&1); RC=$?
+assert_rc 'shim forwards arguments' 0 "$RC"
+assert_contains 'shim forwards the project dir' "$proj" "$o"
+
+# ---------------------------------------------------------------------------
+note '18. Naming: no user-facing ArchiDev-Flow'
+# ---------------------------------------------------------------------------
+# The only permitted mentions are the legacy migration path, the deprecation
+# shim, and documentation that explains them.
+# (a) Nothing a user actually sees may say ArchiDev-Flow, except the shim's
+#     own deprecation line, which is the documented compatibility note.
+runtime_out=$( { "$FLOW" --help
+                 "$FLOW" --version
+                 "$FLOW" --dry-run --config "$dcfg" "$proj"
+                 "$ROOT/scripts/check-dependencies" "$dcfg"
+                 SHELL=/bin/true "$ROOT/lib/ad2-pane" consultant echo hi
+                 SHELL=/bin/true "$ROOT/lib/ad2-pane" files true
+               } 2>&1 || true )
+assert_not_contains 'no ArchiDev-Flow in any normal program output' 'ArchiDev-Flow' "$runtime_out"
+assert_contains 'output uses the new product name' 'ArchiDev2' "$runtime_out"
+
+# (b) Source files with no legacy role must not mention the old name at all.
+stray=$(grep -rn 'ArchiDev-Flow\|archidev-flow' \
+  "$ROOT/wezterm" "$ROOT/lib/ad2-pane" "$ROOT/scripts" "$ROOT/examples" \
+  "$ROOT/tests/lua-behaviour.js" 2>/dev/null || true)
+if [[ -n $stray ]]; then
+  bad 'no ArchiDev-Flow references in files with no legacy role'
+  printf '%s\n' "$stray" | head -10
+else
+  ok 'no ArchiDev-Flow references in files with no legacy role'
+fi
+
+# (c) In the library, every mention must belong to the legacy config path or
+#     the migration helper - not to live ArchiDev2 behaviour.
+badlib=$(grep -n 'ArchiDev-Flow\|archidev-flow' "$ROOT/lib/ad2-lib.sh" \
+  | grep -viE 'archidev-flow/config|electron|pre-rename|older prototype|previous prototype|legacy' || true)
+if [[ -n $badlib ]]; then
+  bad 'library mentions the old name only for the legacy path'
+  printf '%s\n' "$badlib" | head -5
+else
+  ok 'library mentions the old name only for the legacy path'
+fi
+for f in "$ROOT/lib/ad2-pane" "$ROOT/scripts/check-dependencies" "$ROOT/examples/config.example"; do
+  if grep -q 'ArchiDev-Flow' "$f"; then
+    bad "user-visible strings renamed: ${f#"$ROOT/"}"
+  else
+    ok "user-visible strings renamed: ${f#"$ROOT/"}"
+  fi
+done
+assert_contains 'launcher identifies itself as archidev2' 'archidev2' "$("$FLOW" --version)"
+assert_contains 'config path uses the archidev2 directory' '/archidev2/config' "$("$FLOW" --print-config-path)"
+
+# ---------------------------------------------------------------------------
+note '19. Lua: focus, labels, menu and mouse'
+# ---------------------------------------------------------------------------
+for needle in \
+  'CONSULTANT' 'DEVELOPER' 'FILES' \
+  'inactive_pane_hsb' 'hide_tab_bar_if_only_one_tab = false' \
+  'set_left_status' 'InputSelector' 'mouse_bindings' \
+  'archidev2-action-menu' 'archidev2-help' 'panes_with_info' 'ARCHIDEV2_ROLE'; do
+  grep -q -- "$needle" "$LUA" && ok "lua contains: $needle" || bad "lua missing: $needle"
+done
+grep -q 'focus moved' "$LUA" && ok 'lua confirms focus movement after routing' || bad 'lua confirms focus movement'
+
+# Live testing showed Micro's selection is invisible to WezTerm, so no in-product
+# text may tell the user to Shift-drag in Micro to route a selection.
+if grep -niE 'shift[- ]drag|hold shift while dragging' "$LUA" >/dev/null; then
+  bad 'lua help does not promise Shift-drag selection from Micro'
+  grep -niE 'shift[- ]drag|hold shift while dragging' "$LUA" | head -3
+else
+  ok 'lua help does not promise Shift-drag selection from Micro'
+fi
+if grep -niE 'shift[- ]drag|hold shift while dragging' "$ROOT/bin/archidev2" >/dev/null; then
+  bad 'startup hint does not promise Shift-drag selection from Micro'
+else
+  ok 'startup hint does not promise Shift-drag selection from Micro'
+fi
+grep -q 'Ctrl+C' "$LUA" && ok 'lua help points at the Ctrl+C clipboard route for Micro' \
+  || bad 'lua help points at the Ctrl+C clipboard route for Micro'
+grep -q "copy with Ctrl+C" "$ROOT/bin/archidev2" \
+  && ok 'startup hint points at the Ctrl+C clipboard route' \
+  || bad 'startup hint points at the Ctrl+C clipboard route'
+
+# The README must carry the tested interaction matrix, not an aspirational one.
+readme="$ROOT/README.md"
+grep -q 'What works where (tested)' "$readme" \
+  && ok 'README documents the tested interaction matrix' \
+  || bad 'README documents the tested interaction matrix'
+for row in 'CONSULTANT' 'DEVELOPER' 'Micro' 'Another application'; do
+  grep -q "^| \*\*$row\*\*" "$readme" || grep -q "| \*\*$row\*\*" "$readme" \
+    && ok "README matrix has a row for $row" || bad "README matrix has a row for $row"
+done
+grep -q 'get_selection_text_for_pane' "$readme" \
+  && ok 'README explains why Micro selection is unreadable' \
+  || bad 'README explains why Micro selection is unreadable'
+if grep -nE 'Shift-drag to select|hold Shift while dragging' "$readme" >/dev/null; then
+  bad 'README does not instruct Shift-drag selection from Micro'
+  grep -nE 'Shift-drag to select|hold Shift while dragging' "$readme" | head -3
+else
+  ok 'README does not instruct Shift-drag selection from Micro'
+fi
+grep -q 'active_notice' "$LUA" && ok 'lua suppresses status repaint over a confirmation' || bad 'lua notice suppression'
+# One shared action_callback per overlay: creating them per click leaks events.
+cb=$(grep -v '^\s*--' "$LUA" | grep -c 'wezterm.action_callback')
+if (( cb <= 2 )); then ok "lua registers few action callbacks ($cb)"; else bad "lua registers $cb action callbacks (leaks per click)"; fi
+grep -q "mouse_reporting = true" "$LUA" && bad 'lua does not steal the mouse from Micro/Yazi' \
+  || ok 'lua does not steal the mouse from Micro/Yazi'
+grep -qE 'event = \{ Up = \{ streak = 1, button = MOUSE_MENU_BUTTON \} \}' "$LUA" \
+  && ok 'lua binds the action menu to the Up event' \
+  || bad 'lua binds the action menu to the Up event'
+if grep -B2 -A2 "EmitEvent 'archidev2-action-menu'" "$LUA" | grep -q 'Down = { streak'; then
+  bad 'lua no longer opens the menu on Down'
+else
+  ok 'lua no longer opens the menu on Down'
+fi
+if grep -nE '\bos\.execute\b|\bio\.popen\b' "$LUA" >/dev/null; then
+  bad 'lua does not shell out'
+else
+  ok 'lua does not shell out'
+fi
+
+# The installed wezterm validates the whole config, including mouse bindings
+# and every key spec we generate.
+if command -v wezterm >/dev/null 2>&1; then
+  keys_env=$(printf 'KEY_SEND_SELECTION_CONSULTANT\tALT|SHIFT\tc\nKEY_HELP\tALT\th\nKEY_ZOOM\tALT\tz\n')
+  if o=$(ARCHIDEV2_KEYS="$keys_env" ARCHIDEV2_MOUSE_MENU_BUTTON=Right \
+         wezterm --config-file "$LUA" show-keys 2>&1 >"$SANDBOX/keys.txt"); then
+    ok 'wezterm accepts the config with generated key and mouse bindings'
+  else
+    bad "wezterm rejected the config: $o"
+  fi
+  kt=$(cat "$SANDBOX/keys.txt")
+  assert_contains 'wezterm registered the send-selection binding' 'archidev2-send-selection-consultant' "$kt"
+  assert_contains 'wezterm registered the help binding' 'archidev2-help' "$kt"
+  # The menu must open on the completed click (Up). Opening on Down let the
+  # release land on the freshly opened InputSelector and dismiss it, which is
+  # what a trackpad tap always did.
+  if printf '%s' "$kt" | grep -qE 'Up \{ streak: 1, button: Right \} +-> +EmitEvent\("archidev2-action-menu"\)'; then
+    ok 'right-click menu opens on mouse Up'
+  else
+    bad 'right-click menu opens on mouse Up'
+  fi
+  if printf '%s' "$kt" | grep -qE 'Down \{ streak: 1, button: Right \} +-> +EmitEvent\("archidev2-action-menu"\)'; then
+    bad 'right-click menu does not also fire on mouse Down'
+  else
+    ok 'right-click menu does not also fire on mouse Down'
+  fi
+  # Down must be neutralised, or a button with a WezTerm default (middle-click
+  # paste) would act on press and then open the menu on release.
+  if printf '%s' "$kt" | grep -qE 'Down \{ streak: 1, button: Right \} +-> +Nop'; then
+    ok 'menu button press is a no-op'
+  else
+    bad 'menu button press is a no-op'
+  fi
+  # Ordinary selection and copy must be untouched.
+  if printf '%s' "$kt" | grep -qE 'Up \{ streak: 1, button: Left \} +-> +CompleteSelection'; then
+    ok 'left-button selection and copy left alone'
+  else
+    bad 'left-button selection and copy left alone'
+  fi
+  assert_contains 'legacy Ctrl+Alt alias still bound' 'ALT | CTRL' "$kt"
+  # Focus and send must stay distinct: Alt+c focuses, Alt+Shift+C sends.
+  if printf '%s' "$kt" | grep -qE 'ALT +c +-> +EmitEvent\("archidev2-focus-consultant"\)'; then
+    ok 'Alt+C focuses the consultant'
+  else
+    bad 'Alt+C focuses the consultant'
+  fi
+  if printf '%s' "$kt" | grep -qE 'ALT +C +-> +EmitEvent\("archidev2-send-selection-consultant"\)'; then
+    ok 'Alt+Shift+C sends the selection (distinct from focus)'
+  else
+    bad 'Alt+Shift+C sends the selection (distinct from focus)'
+  fi
+  # MOUSE_MENU_BUTTON=Middle must move both entries to the middle button and
+  # override WezTerm's default middle-click paste rather than firing with it.
+  if o=$(ARCHIDEV2_MOUSE_MENU_BUTTON=Middle wezterm --config-file "$LUA" show-keys 2>&1 >"$SANDBOX/keys-mid.txt"); then
+    km=$(cat "$SANDBOX/keys-mid.txt")
+    if printf '%s' "$km" | grep -qE 'Up \{ streak: 1, button: Middle \} +-> +EmitEvent\("archidev2-action-menu"\)'; then
+      ok 'MOUSE_MENU_BUTTON=Middle opens the menu on middle Up'
+    else
+      bad 'MOUSE_MENU_BUTTON=Middle opens the menu on middle Up'
+    fi
+    if printf '%s' "$km" | grep -qE 'Down \{ streak: 1, button: Middle \} +-> +PasteFrom'; then
+      bad 'MOUSE_MENU_BUTTON=Middle suppresses the default middle-click paste'
+    else
+      ok 'MOUSE_MENU_BUTTON=Middle suppresses the default middle-click paste'
+    fi
+    printf '%s' "$km" | grep -q 'button: Right' \
+      && bad 'MOUSE_MENU_BUTTON=Middle leaves the right button free' \
+      || ok 'MOUSE_MENU_BUTTON=Middle leaves the right button free'
+  else
+    bad "wezterm rejected the config with the middle-button menu: $o"
+  fi
+
+  # MOUSE_MENU_BUTTON=off must produce no ArchiDev2 mouse binding at all, and
+  # must hand the middle button back to WezTerm's default.
+  if o=$(ARCHIDEV2_MOUSE_MENU_BUTTON=off wezterm --config-file "$LUA" show-keys 2>&1 >"$SANDBOX/keys-off.txt"); then
+    ko=$(cat "$SANDBOX/keys-off.txt")
+    printf '%s' "$ko" | grep -q 'archidev2-action-menu.*button\|button.*archidev2-action-menu' \
+      && bad 'MOUSE_MENU_BUTTON=off removes the mouse binding' \
+      || ok 'MOUSE_MENU_BUTTON=off removes the mouse binding'
+    printf '%s' "$ko" | grep -q 'button: Right' \
+      && bad 'MOUSE_MENU_BUTTON=off leaves the right button untouched' \
+      || ok 'MOUSE_MENU_BUTTON=off leaves the right button untouched'
+    if printf '%s' "$ko" | grep -qE 'Down \{ streak: 1, button: Middle \} +-> +PasteFrom'; then
+      ok 'MOUSE_MENU_BUTTON=off restores default middle-click paste'
+    else
+      bad 'MOUSE_MENU_BUTTON=off restores default middle-click paste'
+    fi
+  else
+    bad "wezterm rejected the config with the mouse menu off: $o"
+  fi
+else
+  printf '  \033[2mskip\033[0m wezterm not installed; config not validated\n'
+fi
+
+# ---------------------------------------------------------------------------
 note '14. Repository hygiene'
 # ---------------------------------------------------------------------------
-for f in README.md bin/archidev-flow lib/archidev-lib.sh lib/archidev-pane \
-         wezterm/archidev-flow.lua scripts/check-dependencies \
+for f in README.md bin/archidev2 bin/archidev-flow lib/ad2-lib.sh lib/ad2-pane \
+         wezterm/archidev2.lua scripts/check-dependencies \
          examples/config.example tests/run-tests; do
   [[ -e "$ROOT/$f" ]] && ok "present: $f" || bad "missing: $f"
 done

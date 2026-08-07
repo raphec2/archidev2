@@ -1,4 +1,4 @@
-# ArchiDev-Flow (prototype)
+# ArchiDev2 (prototype)
 
 A deliberately small workspace for using one AI CLI as a **consultant** and another as a
 **developer**, side by side, with easy text routing between them.
@@ -9,14 +9,49 @@ here is Electron, Chromium, React, a web UI or a custom terminal emulator.
 
 ```
 ┌───────────────────────────┬───────────────────────────┐
-│ Consultant  (codex)       │ Developer  (claude)       │
+│ CONSULTANT  (codex)       │ DEVELOPER  (claude)       │
 │ cwd = CONSULTANT_DIR      │ cwd = selected project    │
 ├───────────────────────────┴───────────────────────────┤
-│ Files  (yazi -> micro)    cwd = selected project      │
+│ FILES  (yazi -> micro)    cwd = selected project      │
+├───────────────────────────────────────────────────────┤
+│ ▶ CONSULTANT | DEVELOPER | FILES     Send selection…  │  <- status bar
 └───────────────────────────────────────────────────────┘
 ```
 
 Linux-first. Windows/macOS are not implemented.
+
+> ArchiDev2 replaces an older Electron application called ArchiDev-Flow. The only places that
+> name still appears are the legacy config migration and a deprecated launcher shim, both
+> described below.
+
+---
+
+## First use, start to finish
+
+```sh
+# 1. Check what you have. This never installs anything.
+./scripts/check-dependencies
+
+# 2. Launch against a project directory (use a scratch one the first time).
+./bin/archidev2 ~/some/project
+```
+
+On first run it asks once for a **consultant directory** — where the consultant AI starts, kept
+separate from your project — and remembers it.
+
+Then, in the window:
+
+3. **Select text** with the mouse in any pane.
+4. **Send it**: `Alt+Shift+C` → CONSULTANT, `Alt+Shift+D` → DEVELOPER. Or **right-click** for a
+   menu of actions.
+5. **Focus follows the text.** The status bar confirms: `Sent selection to DEVELOPER — focus
+   moved`. Nothing is ever submitted for you; press Enter yourself when you're ready.
+6. **Open and edit files** in the bottom pane: `Alt+F`, browse in Yazi, press Enter on a file to
+   open Micro, quit Micro to return to Yazi.
+7. **From Micro, copy instead of dragging.** Micro keeps its selection to itself, so ArchiDev2
+   cannot read it. Select in Micro, press `Ctrl+C`, then use a **Send clipboard** action.
+
+Press `Alt+H` at any time for the full list.
 
 ---
 
@@ -31,7 +66,7 @@ Linux-first. Windows/macOS are not implemented.
 | `codex` | consultant AI (or whatever you set `CONSULTANT_COMMAND` to) |
 | `claude` | developer AI (or whatever you set `DEVELOPER_COMMAND` to) |
 
-**Optional** (the workspace still launches without them, with a reduced files pane)
+**Optional** (the workspace still launches without them)
 
 | | why | without it |
 |---|---|---|
@@ -39,14 +74,8 @@ Linux-first. Windows/macOS are not implemented.
 | `micro` | editor opened from the file manager | falls back to `nano`, then `vi` |
 | `base64` | tags panes with their role for text routing | routing falls back to pane ids recorded at startup |
 
-Check what you have — this never installs anything:
-
-```sh
-./scripts/check-dependencies
-```
-
-It reads your config, so it checks *your* configured commands, not just the defaults, and prints
-per-distro install hints for anything missing.
+`./scripts/check-dependencies` reads your config, so it checks *your* configured commands, not
+just the defaults, and prints per-distro install hints for anything missing.
 
 ---
 
@@ -55,9 +84,9 @@ per-distro install hints for anything missing.
 Straight from the repository, no install step:
 
 ```sh
-./bin/archidev-flow .                     # current directory as the project
-./bin/archidev-flow ~/code/some-project   # or any path, relative or absolute
-./bin/archidev-flow                       # no argument == "."
+./bin/archidev2 .                     # current directory as the project
+./bin/archidev2 ~/code/some-project   # or any path, relative or absolute
+./bin/archidev2                       # no argument == "."
 ```
 
 Put it on `PATH` with a symlink (the script resolves its own symlink, so the repo can live
@@ -65,25 +94,8 @@ anywhere):
 
 ```sh
 mkdir -p ~/.local/bin
-ln -s "$PWD/bin/archidev-flow" ~/.local/bin/archidev-flow
+ln -s "$PWD/bin/archidev2" ~/.local/bin/archidev2
 ```
-
-### First run
-
-If `CONSULTANT_DIR` is not configured, the launcher asks for it once:
-
-```
-First run: ArchiDev-Flow needs a consultant working directory.
-Consultant directory [/home/you/archidev-consultant]:
-```
-
-Press Enter to take the suggestion, or type a path (`~` is expanded). If the directory does not
-exist you are asked whether to create it. The answer is saved to
-`${XDG_CONFIG_HOME:-~/.config}/archidev-flow/config` (dir `0700`, file `0600`). This is the only
-file ArchiDev-Flow ever writes outside the repository, and nothing is written into your project.
-
-Non-interactive use skips the prompt entirely — pass `--consultant-dir DIR`, or create the
-config file yourself.
 
 ### Options
 
@@ -93,6 +105,8 @@ config file yourself.
 -c, --config FILE        use an alternative config file
     --consultant-dir D   override CONSULTANT_DIR for this launch only (not saved)
     --no-files-pane      two panes only
+    --no-migrate         do not migrate a config from the older prototype
+-q, --quiet              do not print the startup hint
     --print-config-path  print the config path and exit
 -h, --help / -V, --version
 ```
@@ -102,16 +116,137 @@ Exit codes: `0` ok · `2` bad arguments or project path · `3` consultant-direct
 
 ---
 
+## Controls
+
+### Keyboard
+
+| keys | action |
+|---|---|
+| `Alt+Shift+C` / `Alt+Shift+D` | send the **selection** to Consultant / Developer |
+| `Ctrl+Alt+Shift+C` / `Ctrl+Alt+Shift+D` | send the **clipboard** to Consultant / Developer |
+| `Alt+C` / `Alt+D` / `Alt+F` | focus Consultant / Developer / Files |
+| `Alt+Enter` | open the action menu (keyboard twin of right-click) |
+| `Alt+Z` | maximise / restore the active pane |
+| `Alt+H` | help overlay |
+| `Alt+←↑↓→` | move focus between panes |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | WezTerm's own copy / paste, never overridden |
+
+Legacy aliases kept from the first prototype: `Ctrl+Alt+C` / `Ctrl+Alt+D` (send selection) and
+`Alt+E` (focus Files).
+
+**Why the defaults moved.** `Ctrl+Alt+D` is "show desktop" on Cinnamon and never reaches
+WezTerm, so selection sending moved to `Alt+Shift`. Note the one deliberate change of meaning:
+`Alt+Shift+C`/`D` used to send the *clipboard* and now send the *selection*; the clipboard moved
+to `Ctrl+Alt+Shift`. Every binding is configurable (see below).
+
+### Mouse
+
+**Right-click opens the ArchiDev2 action menu**, on the button *release*. WezTerm has no default
+right-button binding, so nothing is taken away from you.
+
+The menu offers, depending on whether text is selected:
+
+- Send selection to CONSULTANT / DEVELOPER
+- Copy selection to the clipboard (normal WezTerm copy)
+- Send clipboard to CONSULTANT / DEVELOPER
+- Paste clipboard into this pane
+- Show all shortcuts
+- Cancel
+
+Rows can be **clicked with the mouse**, picked with the arrow keys, or chosen by pressing the
+number shown against them. Escape cancels and does nothing.
+
+Micro and Yazi capture the mouse, so a plain right-click goes to them rather than to ArchiDev2.
+Holding **Shift** is WezTerm's documented bypass and should route the click to ArchiDev2 instead;
+this was not confirmed on the tested setup, so **`Alt+Enter` is the reliable way to open the menu
+from those panes** — that is verified to work. ArchiDev2 deliberately does not set
+`mouse_reporting = true`, which would take the button away from Micro and Yazi entirely.
+
+The menu deliberately opens on the **completed click** (WezTerm's `Up` event) rather than on
+press. Opening it on press meant the release that followed landed on the just-opened chooser and
+dismissed it — unavoidable on a trackpad, where press and release are one tap. The press itself
+is bound to `Nop` for whichever button is configured, so a button that has a WezTerm default
+(middle-click pastes the primary selection) cannot fire that default and then open the menu.
+Left-button selection, copy and paste are untouched.
+
+This is the whole of what WezTerm supports for mouse-driven controls: it has no toolbar,
+clickable-widget or custom-overlay API, and its `InputSelector` chooser is the only clickable
+control available to a config. No second GUI, web server, daemon or synthetic-mouse trickery was
+added to fake anything more.
+
+`MOUSE_MENU_BUTTON` can be set to `Right`, `Middle`, or `off`. With `off`, WezTerm's own default
+middle-click paste is left in place.
+
+### What works where (tested)
+
+Micro and WezTerm expose different selection models, so there is **no single uniform gesture yet**.
+This is the matrix as actually live-tested on Linux Mint with WezTerm 20240203 and Micro 2.0.13:
+
+| Source | How to send it |
+|---|---|
+| **CONSULTANT** pane | normal mouse drag → action menu, or `Alt+Shift+C`/`D` |
+| **DEVELOPER** pane | normal mouse drag → action menu, or `Alt+Shift+C`/`D` |
+| **Micro** (files pane) | select in Micro → `Ctrl+C` → `Alt+Enter` → **Send clipboard to …** |
+| **Another application** | copy there → action menu → **Send clipboard to …** |
+
+Why the difference: ArchiDev2 reads selections through WezTerm's
+`get_selection_text_for_pane`, which only knows about selections WezTerm itself made. Micro draws
+and owns its own selection internally, so WezTerm has nothing to hand over — dragging in Micro,
+with or without Shift, leaves ArchiDev2 reporting *no text selected*. Clipboard routing is the
+supported path out of Micro, and it still moves focus to the destination.
+
+Keyboard shortcuts are accelerators. **The mouse action menu is the preferred, discoverable
+control** — it shows exactly which destinations are available for what you have selected.
+
+### Selection routing vs clipboard routing
+
+**Selection routing** (`Alt+Shift+…`, and the menu's *Send selection* rows) reads the text
+WezTerm itself has selected, strips trailing newlines, inserts it into the destination, clears
+the source selection and focuses the destination. This is the preferred path.
+
+**Clipboard routing** (`Ctrl+Alt+Shift+…`, and the menu's *Send clipboard* rows) is the
+dependable fallback for anything WezTerm cannot hand to Lua as a selection. It focuses the
+destination and performs WezTerm's own paste there.
+
+**Nothing is ever submitted.** Text is inserted with WezTerm's paste path (`pane:send_paste`),
+which uses bracketed paste whenever the receiving program enables it — both Codex and Claude
+Code do. No Enter, newline or other execution keystroke is ever appended. Newlines *inside* the
+text are preserved, so multiline prompts arrive intact.
+
+---
+
+## Seeing which pane has focus
+
+- Inactive panes are **dimmed** (`INACTIVE_PANE_BRIGHTNESS`, default `0.60`) but stay readable.
+- The divider between panes is a bright accent colour.
+- The **status bar along the bottom** always shows the three role labels — `CONSULTANT`,
+  `DEVELOPER`, `FILES` — with the active one drawn as a filled, coloured chip and the others
+  dim.
+- After a transfer the status bar shows a confirmation such as `Sent selection to DEVELOPER —
+  focus moved` for a few seconds. The periodic status repaint checks for a live confirmation and
+  leaves it alone rather than erasing it.
+
+WezTerm has **no per-pane title bar** ([upstream issue #1970](https://github.com/wezterm/wezterm/issues/1970)),
+so a label cannot be drawn inside each pane. The status-bar chips are the closest supported
+equivalent; the alternative — printing labels into the panes — would land in each AI's scrollback
+and be wiped by its first full-screen redraw, so it is not done.
+
+---
+
 ## Configuration
 
-`${XDG_CONFIG_HOME:-~/.config}/archidev-flow/config`, see [`examples/config.example`](examples/config.example).
+`${XDG_CONFIG_HOME:-~/.config}/archidev2/config`, see [`examples/config.example`](examples/config.example).
 
 ```sh
-CONSULTANT_DIR='/home/you/archidev-consultant'
+CONSULTANT_DIR='/home/you/archidev2-consultant'
 CONSULTANT_COMMAND='codex'
 DEVELOPER_COMMAND='claude'
 FILE_MANAGER_COMMAND='yazi'
 EDITOR_COMMAND='micro'
+KEY_SEND_SELECTION_CONSULTANT='ALT|SHIFT c'
+MOUSE_MENU_BUTTON='Right'
+INACTIVE_PANE_BRIGHTNESS='0.60'
+STARTUP_HINT='on'
 ```
 
 **File format.** `KEY=VALUE`, one per line. `#` comments and blank lines ignored. Whitespace
@@ -127,197 +262,179 @@ CONSULTANT_COMMAND='codex --model gpt-5'   ->  argv = ["codex", "--model", "gpt-
 ```
 
 * The split happens once, in Bash; the argv list is handed to WezTerm one word per line and
-  executed with no shell in between. Shell metacharacters in a value are therefore inert, not
-  dangerous — and also not functional: no pipes, no redirection, no `&&`.
-* There is **no quoting inside a command value**, so *an argument cannot contain a space*. This
-  is the documented limitation of the prototype. If you need that, write a two-line wrapper
-  script and point the config at it.
+  executed with no shell in between. Shell metacharacters in a value are inert, not dangerous —
+  and also not functional: no pipes, no redirection, no `&&`.
+* There is **no quoting inside a command value**, so *an argument cannot contain a space*. If you
+  need that, write a two-line wrapper script and point the config at it.
 * The first word must be on `PATH` or an absolute path.
 
-`EDITOR_COMMAND` is the exception: it is exported verbatim as `EDITOR`/`VISUAL` for the files
-pane, so the file manager's own editor-launching rules apply to it.
+**Key binding format.** `MODS key`, where `MODS` is one or more of `CTRL ALT SHIFT SUPER` joined
+by `|`, or `NONE`; and `key` is a single letter or digit, or one of `Enter Tab Space Escape
+Backspace Delete Insert Home End PageUp PageDown LeftArrow RightArrow UpArrow DownArrow
+F1`–`F24`. Anything outside that grammar is rejected with a warning and the default is used, so
+a bad value can never break the workspace or reach Lua as code. Configurable keys:
+`KEY_SEND_SELECTION_CONSULTANT`, `KEY_SEND_SELECTION_DEVELOPER`,
+`KEY_SEND_CLIPBOARD_CONSULTANT`, `KEY_SEND_CLIPBOARD_DEVELOPER`, `KEY_FOCUS_CONSULTANT`,
+`KEY_FOCUS_DEVELOPER`, `KEY_FOCUS_FILES`, `KEY_ACTION_MENU`, `KEY_HELP`, `KEY_ZOOM`.
 
-**Defaults** if a key is absent: `codex`, `claude`, `yazi`, `micro`.
+`archidev2 --dry-run` prints every resolved binding with its human-readable label.
 
----
+### Migrating from the first prototype
 
-## Layout and shortcuts
+The pre-rename prototype stored its settings in `~/.config/archidev-flow/config`. On first
+launch, **if — and only if — no ArchiDev2 config exists yet**, those settings are copied to
+`~/.config/archidev2/config` and the move is reported:
 
-The layout is built inside WezTerm's `gui-startup` event — the deterministic hook for exactly
-this — so there is no sleeping, polling, or racing against shell startup. Consultant is spawned
-first, the developer is a `Right` split of it, and the files pane is a `top_level` `Bottom`
-split so it spans the full width. The requested layout is produced exactly; no compromise was
-needed.
+```
+archidev2: migrated settings from the previous prototype:
+  from: /home/you/.config/archidev-flow/config
+  to:   /home/you/.config/archidev2/config  (mode 600, preserved)
+  keys: CONSULTANT_DIR
+The old file was left untouched; nothing else in that directory was read.
+```
 
-| keys | action |
-|---|---|
-| `Alt` `c` / `d` / `e` | focus Consultant / Developer / Files |
-| `Ctrl+Alt` `c` / `d` | send **current selection** to Consultant / Developer |
-| `Alt+Shift` `C` / `D` | send **clipboard** to Consultant / Developer |
-| `Alt` `z` | zoom (maximise) the active pane, toggle |
-| `Alt` `←↑↓→` | move focus between panes |
-| `Alt` `h` | show the shortcut legend |
-| `Ctrl+Shift` `C` / `V` | WezTerm's own copy / paste, unchanged |
+An existing ArchiDev2 config is **never** overwritten, the old file is **never** deleted, and the
+file's permissions are preserved. Note that `~/.config/archidev-flow/` is shared with the old
+Electron application's caches, cookies and workspaces: migration reads exactly one file,
+`config`, and touches nothing else in there. `--no-migrate` skips it entirely.
 
-The legend is always visible in the status bar on the right, and transfer results ("sent 128
-bytes to consultant (paste, not submitted)") appear there too.
+### Deprecated launcher
 
-**Transferred text is never submitted.** Text is inserted with WezTerm's paste path
-(`pane:send_paste`), which uses bracketed paste whenever the receiving program enables it — both
-Codex and Claude Code do. No Enter, newline or other execution keystroke is ever appended, and
-selections are stripped of *trailing* newlines before transfer so that a whole-line selection
-cannot act as Enter. Newlines *inside* the text are preserved, which is the point: multiline
-prompts arrive intact.
-
-**Selection routing** reads the selection from the pane you are in, sends it, then clears the
-selection and focuses the destination. **Clipboard routing** is the dependable fallback for
-anything the terminal cannot hand to Lua as a selection.
-
-### Pane identity
-
-Routing must never hit the wrong pane, so identity is explicit, not positional:
-
-1. Each pane runs `lib/archidev-pane <role> …`, which immediately emits an OSC 1337
-   `SetUserVar` tagging the pane `ARCHIDEV_ROLE=consultant|developer|files`. Lua reads it with
-   `pane:get_user_vars()`. It survives config reloads, resizes, and the AI process exiting.
-2. A registry of pane ids recorded at `gui-startup` is used only if a pane has not reported its
-   user var yet.
-
-Both lookups are **scoped to the current mux window**, so a second `archidev-flow` launch, an
-extra tab, or an unrelated pane can never receive text meant for this window. Each launch is
-also a separate WezTerm process (`--always-new-process` where supported) with its own workspace
-name, `archidev-<project>-<pid>-<epoch>`, so re-running the launcher never collides with a
-previous session.
-
-### When an AI exits
-
-`lib/archidev-pane` runs the command, and when it exits prints its status and `exec`s an
-interactive shell in the same pane. The pane stays usable and keeps its role tag; nothing is
-destroyed.
+`bin/archidev-flow` remains as a thin shim: it prints a one-line deprecation notice and `exec`s
+`bin/archidev2` with your arguments unchanged. It exists only so an existing symlink on `PATH`
+keeps working, and can be deleted.
 
 ---
 
 ## Files pane
 
 The bottom pane starts Yazi in the project directory with `EDITOR` and `VISUAL` set to the
-configured editor **for that pane's process tree only** — your shell rc files are not touched
-and no environment is modified globally. Pressing `o`/`Enter` on a text file in Yazi opens
-Micro; quitting Micro returns you to Yazi.
+configured editor **for that pane's process tree only** — your shell rc files are not touched and
+no environment is modified globally. Pressing Enter on a text file opens Micro; quitting Micro
+returns you to Yazi.
 
-To move text out of the editor, select it with the mouse and use `Ctrl+Alt+c` / `Ctrl+Alt+d`.
-Micro captures the mouse, so hold **Shift** while dragging to make WezTerm take the selection
-instead of the application. Alternatively use Micro's own copy (`Ctrl+C`) and then
-`Alt+Shift+C` / `Alt+Shift+D`.
+To move text out of the editor, use Micro's own copy: select in Micro, press `Ctrl+C`, open the
+action menu with `Alt+Enter`, and choose **Send clipboard to CONSULTANT/DEVELOPER**. Focus still
+moves to the destination. Dragging in Micro does not produce a selection ArchiDev2 can read (see
+the interaction matrix above).
 
 No destructive file shortcuts are defined; Yazi's own defaults apply.
 
 If Yazi is missing the pane is a plain shell in the project directory, and the launcher says so
 before starting. If the editor is missing it falls back to `micro`, `nano`, then `vi`.
 
+### When an AI exits
+
+The pane prints one dim line — `archidev2: DEVELOPER exited (status 0) - this pane is now a
+shell.` — and leaves an interactive shell with its role tag intact, so routing keeps working.
+No banner is repeated on every shell restart.
+
 ---
 
 ## Validation
 
 ```sh
-./tests/run-tests            # 141 assertions, no GUI, no network
-./bin/archidev-flow --dry-run .
+./tests/run-tests            # 283 assertions, no GUI, no network
+./bin/archidev2 --dry-run .
 ./scripts/check-dependencies
 ```
 
-`tests/run-tests` redirects `HOME` and `XDG_CONFIG_HOME` into a temporary directory for its
-whole run, so it cannot see or modify your real configuration. It covers Bash syntax, XDG
-resolution, config parsing/writing round-trips (spaces, quotes, `$`, backticks, `#`, unicode),
-command splitting, path resolution (relative, absolute, spaces, leading dash, `..`, missing,
-not-a-directory, unreadable, `CDPATH` hijacking), every launcher exit path, the dependency
-checker, and the pane runner's role tagging and exit behaviour.
+`tests/run-tests` redirects `HOME` and `XDG_CONFIG_HOME` into a temporary directory for its whole
+run, so it cannot see or modify your real configuration. It covers Bash syntax, XDG resolution,
+config parsing/writing round-trips (spaces, quotes, `$`, backticks, `#`, unicode), command
+splitting, key-spec and mouse/brightness validation (including rejection of injection-shaped
+values), path resolution (relative, absolute, spaces, leading dash, `..`, missing,
+not-a-directory, unreadable, `CDPATH` hijacking), every launcher exit path, legacy migration in
+all four states plus permission preservation and shared-directory safety, the deprecation shim,
+the dependency checker, the pane runner's role tagging and exit behaviour, and a naming sweep
+that fails if `ArchiDev-Flow` appears in any normal program output.
 
 It also drives the **interactive first run on a real pty** (via `python3`) and lets it launch a
-**stub `wezterm`**, asserting the config that gets written, its permissions, the directory that
-gets created, and the exact argv and `ARCHIDEV_*` environment handed to WezTerm.
+**stub `wezterm`**, asserting the config written, its permissions, and the exact argv and
+`ARCHIDEV2_*` environment handed to WezTerm.
 
-Lua is checked with whatever is available: `wezterm --config-file … show-keys`, a local
-`luac`/`lua`, or two optional node parsers. The repository has no dependencies of its own, so
-for the last option install them in a scratch directory:
+When `wezterm` is installed, the suite validates the real Lua config with
+`wezterm --config-file … show-keys`, and asserts that the generated key and mouse bindings
+actually register — including that `Alt+C` (focus) and `Alt+Shift+C` (send) stay distinct, and
+that the action menu is bound to the button's `Up` event and not its `Down`, that the press is a
+no-op, that `MOUSE_MENU_BUTTON=Middle` overrides the default middle-click paste, and that
+`MOUSE_MENU_BUTTON=off` produces no mouse binding and restores that default. Two optional node parsers add a syntax
+check and execute the config's pure helpers in a real Lua VM:
 
 ```sh
 d=$(mktemp -d); (cd "$d" && npm install luaparse fengari)
-ADF_NODE_MODULES=$d ./tests/run-tests      # 157 assertions
+AD2_NODE_MODULES=$d ./tests/run-tests      # 299 assertions
 ```
 
-`luaparse` syntax-checks the config; `fengari` is a Lua VM that **executes** the config's pure
-helpers (argv splitting, trailing-newline stripping) and asserts their behaviour. Without any of
-these the Lua checks are reported as skipped, never as passing.
+`--dry-run` resolves and validates config and paths, prints a `printf %q`-quoted summary of what
+would launch plus every key binding, and starts nothing. It prints only ArchiDev2's own values —
+it never dumps the environment and has no access to secrets.
 
-`--dry-run` resolves and validates config and paths, prints a `printf %q`-quoted summary of
-exactly what would launch, and starts nothing. It prints only ArchiDev's own values — it never
-dumps the environment and has no access to secrets.
+**GUI behaviour is not verified automatically.** Everything above runs headless. The layout,
+dimming, status chips, menus and routing must be confirmed by hand.
+
+---
+
+## Manual smoke test
+
+1. **Visible focus** — launch. Consultant is focused: its chip in the bottom bar is a filled
+   colour, the other two are dim, and the other panes are visibly darker but still readable.
+   Press `Alt+D`, then `Alt+F`, then `Alt+C`, and watch the chip and the dimming follow.
+2. **Keyboard selection routing** — select two lines in the consultant, press `Alt+Shift+D`. The
+   text appears in the developer's input, unsubmitted; the selection clears; focus moves; the
+   bar shows `Sent selection to DEVELOPER — focus moved` and does not get wiped a second later.
+   Confirm you can still edit the prompt, then clear it.
+3. **Multiline** — select 3+ lines and route them; confirm they arrive as one prompt, not several
+   submissions.
+4. **Mouse routing** — select text, **right-click** (including a trackpad tap, and a slow
+   press-hold-release), and confirm the menu stays open on release. Pick *Send selection to
+   CONSULTANT* by clicking the row; repeat picking it by number; repeat pressing Escape to
+   confirm cancelling does nothing.
+5. **Clipboard routing** — copy something (`Ctrl+Shift+C`), press `Ctrl+Alt+Shift+C`.
+6. **Micro → Consultant** — `Alt+F`, open a file in Micro, select some text *in Micro*, press
+   `Ctrl+C`, then `Alt+Enter` and choose **Send clipboard to CONSULTANT**. The text arrives and
+   focus moves. Quit Micro and confirm you land back in Yazi.
+7. **Two independent windows** — run `./bin/archidev2 ~/another/project` in a second terminal.
+   Route text in each window and confirm it never lands in the other one's panes.
+8. **Process exit** — exit Claude in the developer pane; confirm the one-line notice, a working
+   shell, and that routing to DEVELOPER still finds that pane.
+9. **Help** — `Alt+H`; check the shortcuts match what you actually pressed, and that clicking a
+   *focus* row moves you there.
 
 ---
 
 ## Known limitations
 
-* **The GUI has not been verified.** WezTerm is not installed on the machine this was built on,
-  so the layout, keybindings and routing are written against WezTerm's documented API but have
-  never been observed running. Everything outside the GUI — the launcher, config handling, the
-  pane runner, the exec into WezTerm, and the Lua config's pure helpers — is tested. Work
-  through the smoke test below before trusting it.
+* **No per-pane labels.** WezTerm cannot draw a title bar per pane
+  ([#1970](https://github.com/wezterm/wezterm/issues/1970)); role labels live in the bottom
+  status bar instead.
+* **No clickable toolbar.** `InputSelector` is the only clickable control a WezTerm config can
+  create. There are no free-floating buttons, and nothing here fakes them.
 * **Clipboard routing cannot trim.** WezTerm's Lua API can write the clipboard but not read it,
-  so clipboard transfers are performed with WezTerm's own `PasteFrom` action into the focused
-  destination. That means bracketed paste is used correctly, but ArchiDev cannot strip a
-  trailing newline from clipboard content the way it does for a selection. In a program that
-  does not implement bracketed paste, clipboard text ending in a newline may be submitted.
-  Selection routing has no such gap. (Before pasting, ArchiDev verifies the destination really
-  is the focused pane and aborts rather than paste into the wrong one.)
-* **Selection routing needs a WezTerm-level selection.** Full-screen TUIs that capture the mouse
-  (Micro, and the AI TUIs themselves) need Shift-drag. If a program renders text that WezTerm
-  cannot select cleanly, use the clipboard route.
-* **`send_paste` availability.** If a WezTerm build does not expose `pane:send_paste`, ArchiDev
-  falls back to `pane:send_text` (raw bytes, still no Enter) and says so in the status bar. It
-  does not fabricate bracketed paste.
-* **No spaces inside command arguments** (see the command format rules).
-* **Routing is per-window.** Extra tabs in the ArchiDev window can still route to the panes
-  (the lookup scans the whole mux window). A *separate* window has no ArchiDev panes, and
-  routing from it reports "no consultant pane in this window" rather than guessing.
+  so clipboard transfers use WezTerm's own paste into the focused destination. Bracketed paste
+  is used correctly, but a trailing newline in the clipboard cannot be stripped, and a program
+  without bracketed-paste support may treat it as Enter. Selection routing has no such gap.
+  Before pasting, ArchiDev2 confirms the destination really is focused and aborts otherwise.
+* **Selection routing needs a WezTerm-level selection.** It works for text dragged in the
+  CONSULTANT and DEVELOPER panes. It does **not** work from Micro: Micro's selection is internal
+  and `get_selection_text_for_pane` returns nothing for it on the tested setup, with or without
+  Shift-drag. Use Micro's `Ctrl+C` and a clipboard action instead.
+* **`Alt+Shift` may be a keyboard-layout switcher** on some desktop setups. If so, rebind via
+  `KEY_SEND_SELECTION_*`.
+* If a WezTerm build lacks `pane:send_paste`, ArchiDev2 falls back to `send_text` (raw, still no
+  Enter) and says so in the status bar rather than faking bracketed paste.
+* **No spaces inside command arguments** — commands are whitespace-split argv lists.
+* **Routing is per-window.** Extra tabs in an ArchiDev2 window can still route to its panes; a
+  separate window reports `No CONSULTANT pane in this window` rather than guessing.
 * Prototype scope: no plugin system, daemon, database, package manager, or Git UI.
-
----
-
-## Manual smoke test (Linux, GUI)
-
-1. `./scripts/check-dependencies` — expect all required items present.
-2. `./bin/archidev-flow --dry-run .` — check the project and consultant directories.
-3. `./bin/archidev-flow .` — first run asks for the consultant directory; accept the default.
-4. **Layout**: consultant left, developer right, files bottom, full width. Consultant is focused.
-5. **cwds**: consultant is in `CONSULTANT_DIR`, developer and files are in the project.
-6. **Focus**: `Alt+d`, `Alt+e`, `Alt+c` — status bar confirms each move.
-7. **Zoom**: `Alt+z` maximises the active pane, `Alt+z` restores it.
-8. **Selection → developer**: in the consultant pane select a couple of lines with the mouse,
-   press `Ctrl+Alt+d`. The text appears in the developer's input, **nothing is submitted**, the
-   selection clears, focus moves to the developer. Confirm the prompt is still editable and
-   press Escape/clear it.
-9. **Multiline**: select 3+ lines, route them, and confirm the line breaks survived as one
-   prompt rather than several submissions.
-10. **Clipboard → consultant**: copy text from anywhere (`Ctrl+Shift+C` in a pane, or another
-    app), press `Alt+Shift+C`. Text lands in the consultant, unsubmitted.
-11. **Files**: `Alt+e`, browse to a text file, open it — Micro opens. Edit, save, quit — you are
-    back in Yazi.
-12. **Editor selection**: in Micro, Shift-drag to select and `Ctrl+Alt+c` to route to the
-    consultant.
-13. **Process exit**: in the developer pane exit Claude. The pane prints the exit status and
-    leaves a shell. Press `Alt+c` then `Ctrl+Alt+d` with a selection — routing still finds the
-    pane.
-14. **Independence**: run `./bin/archidev-flow ~/some/other/project` in another terminal. A
-    second window appears; routing in each window stays within that window.
-15. **Missing optional tool** (optional): set `FILE_MANAGER_COMMAND='nope'` and relaunch —
-    expect a warning and a plain shell in the bottom pane, not a failure.
 
 ---
 
 ## Future Windows note
 
-Not implemented. The shape it would take: WezTerm runs natively on Windows and the Lua config
-here is platform-independent apart from the `/usr/bin/env bash` pane runner, so a Windows port
-is a PowerShell equivalent of `bin/archidev-flow` that resolves paths, reads the same config
-file from `%APPDATA%`, and either launches native `codex.exe`/`claude.exe` with a `.ps1` pane
-runner, or launches the existing Bash runner through `wsl.exe` with paths translated by
-`wslpath`. The routing logic, pane identity scheme and keybindings would carry over unchanged.
+Not implemented. WezTerm runs natively on Windows and this Lua config is platform-independent
+apart from the `/usr/bin/env bash` pane runner, so a port would be a PowerShell equivalent of
+`bin/archidev2` that resolves paths, reads the same config format from `%APPDATA%`, and either
+launches native `codex.exe`/`claude.exe` with a `.ps1` pane runner or runs the existing Bash
+runner through `wsl.exe` with paths translated by `wslpath`. The routing logic, pane identity
+scheme, menus and key bindings would carry over unchanged.

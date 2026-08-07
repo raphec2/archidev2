@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# check-dependencies - report what ArchiDev-Flow needs and what is missing.
+# check-dependencies - report what ArchiDev2 needs and what is missing.
 #
 # Never installs anything. Exit status:
 #   0  everything required is present
@@ -13,9 +13,9 @@ while [[ -L $_self ]]; do
   _t=$(readlink -- "$_self")
   [[ $_t == /* ]] && _self=$_t || _self=$(dirname -- "$_self")/$_t
 done
-ADF_ROOT=$(CDPATH= cd -P -- "$(dirname -- "$_self")/.." && pwd -P)
-# shellcheck source=../lib/archidev-lib.sh
-source "$ADF_ROOT/lib/archidev-lib.sh"
+AD2_ROOT=$(CDPATH= cd -P -- "$(dirname -- "$_self")/.." && pwd -P)
+# shellcheck source=../lib/ad2-lib.sh
+source "$AD2_ROOT/lib/ad2-lib.sh"
 
 use_colour=0
 [[ -t 1 ]] && use_colour=1
@@ -43,22 +43,22 @@ report() {
   return 1
 }
 
-printf 'ArchiDev-Flow dependency check\n'
-printf 'repository: %s\n\n' "$ADF_ROOT"
+printf 'ArchiDev2 dependency check\n'
+printf 'repository: %s\n\n' "$AD2_ROOT"
 
 # What is actually configured (so we check the user's real commands).
-config_file=${1:-$(adf_config_file)}
-adf_config_load "$config_file" >/dev/null 2>&1 || true
-consultant_cmd=$(adf_config_get CONSULTANT_COMMAND   "$ADF_DEFAULT_CONSULTANT_COMMAND")
-developer_cmd=$(adf_config_get  DEVELOPER_COMMAND    "$ADF_DEFAULT_DEVELOPER_COMMAND")
-filemgr_cmd=$(adf_config_get    FILE_MANAGER_COMMAND "$ADF_DEFAULT_FILE_MANAGER_COMMAND")
-editor_cmd=$(adf_config_get     EDITOR_COMMAND       "$ADF_DEFAULT_EDITOR_COMMAND")
+config_file=${1:-$(ad2_config_file)}
+ad2_config_load "$config_file" >/dev/null 2>&1 || true
+consultant_cmd=$(ad2_config_get CONSULTANT_COMMAND   "$AD2_DEFAULT_CONSULTANT_COMMAND")
+developer_cmd=$(ad2_config_get  DEVELOPER_COMMAND    "$AD2_DEFAULT_DEVELOPER_COMMAND")
+filemgr_cmd=$(ad2_config_get    FILE_MANAGER_COMMAND "$AD2_DEFAULT_FILE_MANAGER_COMMAND")
+editor_cmd=$(ad2_config_get     EDITOR_COMMAND       "$AD2_DEFAULT_EDITOR_COMMAND")
 
 declare -a a
-adf_split_command a "$consultant_cmd"; consultant_bin=${a[0]:-}
-adf_split_command a "$developer_cmd";  developer_bin=${a[0]:-}
-adf_split_command a "$filemgr_cmd";    filemgr_bin=${a[0]:-}
-adf_split_command a "$editor_cmd";     editor_bin=${a[0]:-}
+ad2_split_command a "$consultant_cmd"; consultant_bin=${a[0]:-}
+ad2_split_command a "$developer_cmd";  developer_bin=${a[0]:-}
+ad2_split_command a "$filemgr_cmd";    filemgr_bin=${a[0]:-}
+ad2_split_command a "$editor_cmd";     editor_bin=${a[0]:-}
 
 printf 'Required\n'
 report required bash 'the launcher is written in Bash 4+' \
@@ -73,9 +73,9 @@ report required "$developer_bin" "developer AI (DEVELOPER_COMMAND=$developer_cmd
 printf '\nOptional\n'
 report optional "$filemgr_bin" "file manager for the bottom pane (FILE_MANAGER_COMMAND=$filemgr_cmd); without it that pane is a plain shell" \
   'Debian/Ubuntu/Mint: apt install yazi (24.10+) or cargo install --locked yazi-fm yazi-cli | Fedora: dnf install yazi | Arch: pacman -S yazi'
-report optional "$editor_bin" "terminal editor opened from the file manager (EDITOR_COMMAND=$editor_cmd); without it ArchiDev falls back to nano or vi" \
+report optional "$editor_bin" "terminal editor opened from the file manager (EDITOR_COMMAND=$editor_cmd); without it ArchiDev2 falls back to nano or vi" \
   'Debian/Ubuntu/Mint: apt install micro | Fedora: dnf install micro | Arch: pacman -S micro'
-report optional base64 'tags panes with their ArchiDev role for reliable text routing; without it routing falls back to pane ids recorded at startup' \
+report optional base64 'tags panes with their ArchiDev2 role for reliable text routing; without it routing falls back to pane ids recorded at startup' \
   'part of GNU coreutils'
 
 printf '\nOptional editor fallbacks\n'
@@ -90,13 +90,13 @@ done
 printf '\nConfiguration\n'
 if [[ -e $config_file ]]; then
   green; printf '  [ok]      '; reset; printf 'config    %s\n' "$config_file"
-  if [[ -n ${ADF_CONFIG[CONSULTANT_DIR]:-} ]]; then
-    if [[ -d ${ADF_CONFIG[CONSULTANT_DIR]} ]]; then
+  if [[ -n ${AD2_CONFIG[CONSULTANT_DIR]:-} ]]; then
+    if [[ -d ${AD2_CONFIG[CONSULTANT_DIR]} ]]; then
       green; printf '  [ok]      '; reset
-      printf 'consultant dir %s\n' "${ADF_CONFIG[CONSULTANT_DIR]}"
+      printf 'consultant dir %s\n' "${AD2_CONFIG[CONSULTANT_DIR]}"
     else
       red; printf '  [BAD]     '; reset
-      printf 'CONSULTANT_DIR does not exist: %s\n' "${ADF_CONFIG[CONSULTANT_DIR]}"
+      printf 'CONSULTANT_DIR does not exist: %s\n' "${AD2_CONFIG[CONSULTANT_DIR]}"
       missing_required=$((missing_required + 1))
     fi
   else
@@ -106,6 +106,13 @@ if [[ -e $config_file ]]; then
 else
   yellow; printf '  [absent]  '; reset
   printf 'config    %s (created on first launch)\n' "$config_file"
+  legacy=$(ad2_legacy_config_file)
+  if [[ -f $legacy ]]; then
+    yellow; printf '  [note]    '; reset
+    printf 'a config from the older prototype exists at\n'
+    printf '            %s\n' "$legacy"
+    printf '            It will be copied across on first launch. The original is kept.\n'
+  fi
 fi
 
 printf '\n'

@@ -1,6 +1,6 @@
-# ArchiDev-Flow configuration example
+# ArchiDev2 configuration example
 #
-# Copy to:  ${XDG_CONFIG_HOME:-$HOME/.config}/archidev-flow/config
+# Copy to:  ${XDG_CONFIG_HOME:-$HOME/.config}/archidev2/config
 #
 # Format
 #   KEY=VALUE, one per line. Blank lines and lines starting with # are ignored.
@@ -16,9 +16,11 @@
 #   There is no quoting *inside* a command value, so an argument cannot
 #   contain a space. The first word must be on PATH or an absolute path.
 
+# --- what runs where -------------------------------------------------------
+
 # Where the consultant AI starts. Absolute path, must already exist.
 # Asked for interactively on first run if unset.
-CONSULTANT_DIR='/home/example/archidev-consultant'
+CONSULTANT_DIR='/home/example/archidev2-consultant'
 
 # Consultant AI. Default: codex
 CONSULTANT_COMMAND='codex'
@@ -31,5 +33,43 @@ DEVELOPER_COMMAND='claude'
 FILE_MANAGER_COMMAND='yazi'
 
 # Editor exported as EDITOR/VISUAL for the files pane only. Default: micro
-# If missing, ArchiDev falls back to micro, then nano, then vi.
+# If missing, ArchiDev2 falls back to micro, then nano, then vi.
 EDITOR_COMMAND='micro'
+
+# --- key bindings ----------------------------------------------------------
+#
+# Format: "MODS key"
+#   MODS  one or more of CTRL ALT SHIFT SUPER joined by '|', or NONE
+#   key   a single letter/digit, or Enter Tab Space Escape Backspace Delete
+#         Insert Home End PageUp PageDown LeftArrow RightArrow UpArrow
+#         DownArrow F1..F24
+#
+# Anything outside that grammar is rejected with a warning and the default is
+# used, so a bad value can never break the workspace.
+#
+# Defaults avoid desktop-environment collisions: Cinnamon and GNOME take
+# Ctrl+Alt+<letter> (Ctrl+Alt+D is "show desktop" on Mint), and Ctrl+Shift+C/V
+# belong to WezTerm's copy and paste, which ArchiDev2 never overrides.
+
+KEY_SEND_SELECTION_CONSULTANT='ALT|SHIFT c'
+KEY_SEND_SELECTION_DEVELOPER='ALT|SHIFT d'
+KEY_SEND_CLIPBOARD_CONSULTANT='CTRL|ALT|SHIFT c'
+KEY_SEND_CLIPBOARD_DEVELOPER='CTRL|ALT|SHIFT d'
+KEY_FOCUS_CONSULTANT='ALT c'
+KEY_FOCUS_DEVELOPER='ALT d'
+KEY_FOCUS_FILES='ALT f'
+KEY_ACTION_MENU='ALT Enter'
+KEY_HELP='ALT h'
+KEY_ZOOM='ALT z'
+
+# --- look and feel ---------------------------------------------------------
+
+# Which mouse button opens the ArchiDev2 action menu: Right, Middle, or off.
+# Inside Micro and Yazi (which capture the mouse) hold Shift as well.
+MOUSE_MENU_BUTTON='Right'
+
+# Brightness of panes that do not have focus, 0.2 to 1.0. Lower is dimmer.
+INACTIVE_PANE_BRIGHTNESS='0.60'
+
+# Print the short how-to-use hint in the launching terminal: on or off.
+STARTUP_HINT='on'

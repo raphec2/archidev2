@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+#
+# archidev2 - launch a WezTerm workspace with an AI consultant pane,
+#             an AI developer pane and a project file pane.
+#
+# Usage:  archidev2 [OPTIONS] [PROJECT_DIR]
+#
+set -euo pipefail
+
+# Resolve our own location so the script works from a symlink on PATH and
+# directly out of a development checkout.
+_ad2_self=${BASH_SOURCE[0]}
+while [[ -L $_ad2_self ]]; do
+  _ad2_target=$(readlink -- "$_ad2_self")
+  if [[ $_ad2_target == /* ]]; then
+    _ad2_self=$_ad2_target
+  else
+    _ad2_self=$(dirname -- "$_ad2_self")/$_ad2_target
+  fi
+done
+AD2_ROOT=$(CDPATH= cd -P -- "$(dirname -- "$_ad2_self")/.." && pwd -P)
+unset _ad2_self _ad2_target
+
+# shellcheck source=../lib/ad2-lib.sh
+source "$AD2_ROOT/lib/ad2-lib.sh"
+
+AD2_VERSION='0.2.0 (prototype)'
+AD2_LUA_CONFIG="$AD2_ROOT/wezterm/archidev2.lua"
+AD2_PANE_RUNNER="$AD2_ROOT/lib/ad2-pane"
+
+usage() {
+  cat <<EOF
+archidev2 $AD2_VERSION
+
+Launch a WezTerm workspace: AI consultant (left), AI developer (right),
+project files (bottom).
+
+Usage:
+  archidev2 [OPTIONS] [PROJECT_DIR]
+
+  PROJECT_DIR defaults to the current directory.
+
+Options:
+  -n, --dry-run           Resolve and validate configuration and paths, print
+                          what would launch, then exit. Does not start WezTerm.
+      --check-deps        Run the dependency check and exit.
+  -c, --config FILE       Use FILE instead of \$XDG_CONFIG_HOME/archidev2/config
+      --consultant-dir D  Override CONSULTANT_DIR for this launch only.
+      --no-files-pane     Do not create the bottom file-manager pane.
+      --no-migrate        Do not migrate a config from the older prototype.
+  -q, --quiet             Do not print the startup hint.
+      --print-config-path Print the config file path and exit.
+  -h, --help              This help.
+  -V, --version           Print version.
+
+Configuration: $(ad2_config_file)
+Docs:          $AD2_ROOT/README.md
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+dry_run=0
+check_deps_only=0
+config_file=''
+consultant_dir_override=''
+want_files_pane=1
+allow_migrate=1
+quiet=0
+project_arg=''
+saw_project=0
+
+while (($#)); do
+  case $1 in
+    -n|--dry-run)      dry_run=1 ;;
+    --check-deps)      check_deps_only=1 ;;
+    -c|--config)
+      [[ $# -ge 2 ]] || ad2_die 2 "--config requires an argument"
+      config_file=$2; shift ;;
+    --config=*)        config_file=${1#*=} ;;
+    --consultant-dir)
+      [[ $# -ge 2 ]] || ad2_die 2 "--consultant-dir requires an argument"
+      consultant_dir_override=$2; shift ;;
+    --consultant-dir=*) consultant_dir_override=${1#*=} ;;
+    --no-files-pane)   want_files_pane=0 ;;
+    --no-migrate)      allow_migrate=0 ;;
+    -q|--quiet)        quiet=1 ;;
+    --print-config-path) ad2_config_file; exit 0 ;;
+    -h|--help)         usage; exit 0 ;;
+    -V|--version)      printf 'archidev2 %s\n' "$AD2_VERSION"; exit 0 ;;
+    --)                shift
+                       if (($#)); then project_arg=$1; saw_project=1; shift; fi
+                       (($#)) && ad2_die 2 "unexpected extra argument: $1"
+                       break ;;
+    -*)                ad2_die 2 "unknown option: $1 (try --help)" ;;
+    *)
+      (( saw_project )) && ad2_die 2 "unexpected extra argument: $1"
+      project_arg=$1; saw_project=1 ;;
+  esac
+  shift
+done
+
+if (( check_deps_only )); then
+  exec "$AD2_ROOT/scripts/check-dependencies"
+fi
+
+[[ -n $project_arg ]] || project_arg='.'
+[[ -n $config_file ]] || config_file=$(ad2_config_file)
+
+# ---------------------------------------------------------------------------
+# Project directory
+# ---------------------------------------------------------------------------
+
+# `rc=$?` after `if ! cmd` would read the *negated* status, so capture the
+# real exit code with `|| rc=$?` instead. Same pattern everywhere below.
+rc=0
+project_dir=$(ad2_resolve_dir "$project_arg") || rc=$?
+if (( rc != 0 )); then
+  ad2_die 2 "project directory '$project_arg': $(ad2_resolve_dir_error "$rc")"
+fi
+
+# ---------------------------------------------------------------------------
+# Configuration (with one-time migration from the older prototype)
+# ---------------------------------------------------------------------------
+
+if (( allow_migrate )); then
+  # Only ever runs when the ArchiDev2 config does not exist yet; never
+  # overwrites, never deletes the old file.
+  ad2_migrate_legacy_config "$config_file" "$(ad2_legacy_config_file)" || true
+fi
+
+ad2_config_load "$config_file" || exit 1
+
+consultant_command=$(ad2_config_get CONSULTANT_COMMAND   "$AD2_DEFAULT_CONSULTANT_COMMAND")
+developer_command=$(ad2_config_get  DEVELOPER_COMMAND    "$AD2_DEFAULT_DEVELOPER_COMMAND")
+filemgr_command=$(ad2_config_get    FILE_MANAGER_COMMAND "$AD2_DEFAULT_FILE_MANAGER_COMMAND")
+editor_command=$(ad2_config_get     EDITOR_COMMAND       "$AD2_DEFAULT_EDITOR_COMMAND")
+consultant_dir=$(ad2_config_get     CONSULTANT_DIR       '')
+
+if [[ -n $consultant_dir_override ]]; then
+  consultant_dir=$consultant_dir_override
+fi
+
+# --- key bindings ----------------------------------------------------------
+# Each binding is validated against a strict grammar. An invalid value warns
+# and falls back to the default rather than being passed through to Lua.
+declare -A KEYBIND=()
+for _k in "${AD2_KEY_BINDING_KEYS[@]}"; do
+  _default_var="AD2_DEFAULT_$_k"
+  _default=${!_default_var}
+  _value=$(ad2_config_get "$_k" "$_default")
+  if ! ad2_valid_keyspec "$_value"; then
+    ad2_warn "$_k='$_value' is not a valid key spec (want e.g. 'ALT|SHIFT c'); using default '$_default'"
+    _value=$_default
+  fi
+  KEYBIND[$_k]=$_value
+done
+unset _k _default_var _default _value
+
+mouse_menu_button=$(ad2_config_get MOUSE_MENU_BUTTON "$AD2_DEFAULT_MOUSE_MENU_BUTTON")
+if ! ad2_valid_mouse_button "$mouse_menu_button"; then
+  ad2_warn "MOUSE_MENU_BUTTON='$mouse_menu_button' is not one of Right/Middle/off; using '$AD2_DEFAULT_MOUSE_MENU_BUTTON'"
+  mouse_menu_button=$AD2_DEFAULT_MOUSE_MENU_BUTTON
+fi
+
+inactive_brightness=$(ad2_config_get INACTIVE_PANE_BRIGHTNESS "$AD2_DEFAULT_INACTIVE_PANE_BRIGHTNESS")
+if ! ad2_valid_brightness "$inactive_brightness"; then
+  ad2_warn "INACTIVE_PANE_BRIGHTNESS='$inactive_brightness' must be between 0.2 and 1.0; using $AD2_DEFAULT_INACTIVE_PANE_BRIGHTNESS"
+  inactive_brightness=$AD2_DEFAULT_INACTIVE_PANE_BRIGHTNESS
+fi
+
+startup_hint=$(ad2_config_get STARTUP_HINT "$AD2_DEFAULT_STARTUP_HINT")
+case $startup_hint in
+  on|off) ;;
+  *) ad2_warn "STARTUP_HINT='$startup_hint' must be on or off; using on"; startup_hint='on' ;;
+esac
+(( quiet )) && startup_hint='off'
+
+# --- first run: ask for the consultant directory ---------------------------
+#
+# Only reached when CONSULTANT_DIR is unset. Writes exactly one file, under
+# the XDG config dir, after the user confirms.
+prompt_for_consultant_dir() {
+  local suggestion answer resolved rc create
+  suggestion="${HOME:?HOME is not set}/archidev2-consultant"
+
+  # This function's stdout is captured by a command substitution (it returns
+  # the chosen directory), so stdout is a pipe even on a terminal. The prompts
+  # go to stderr, so stderr + stdin are what must be interactive.
+  if [[ ! -t 0 || ! -t 2 ]]; then
+    ad2_err "CONSULTANT_DIR is not configured and this is not an interactive terminal."
+    ad2_msg  ""
+    ad2_msg  "Set it non-interactively with either:"
+    ad2_msg  "  archidev2 --consultant-dir /path/to/consultant ..."
+    ad2_msg  "or by creating $config_file containing:"
+    ad2_msg  "  CONSULTANT_DIR='/path/to/consultant'"
+    exit 3
+  fi
+
+  ad2_msg "First run: ArchiDev2 needs a consultant working directory."
+  ad2_msg "This is where the consultant AI ($consultant_command) will start."
+  ad2_msg "It is remembered in $config_file and is separate from your project."
+  ad2_msg ""
+
+  while true; do
+    printf 'Consultant directory [%s]: ' "$suggestion" >&2
+    IFS= read -r answer || { ad2_msg ''; ad2_die 3 "aborted"; }
+    [[ -n $answer ]] || answer=$suggestion
+    # Expand a leading ~ ourselves; we never eval user input.
+    if [[ $answer == '~' ]]; then
+      answer=$HOME
+    elif [[ $answer == '~/'* ]]; then
+      answer=$HOME/${answer#'~/'}
+    fi
+
+    rc=0
+    resolved=$(ad2_resolve_dir "$answer") || rc=$?
+    if (( rc == 0 )); then
+      printf '%s' "$resolved"
+      return 0
+    fi
+    if (( rc == 3 )); then
+      printf "Directory '%s' does not exist. Create it? [y/N] " "$answer" >&2
+      IFS= read -r create || create=''
+      if [[ $create == [Yy]* ]]; then
+        if mkdir -p -- "$answer" && resolved=$(ad2_resolve_dir "$answer") \
+           && [[ -n $resolved ]]; then
+          printf '%s' "$resolved"
+          return 0
+        fi
+        ad2_err "could not create '$answer'"
+        continue
+      fi
+      ad2_err "not created; please choose another directory"
+    else
+      ad2_err "'$answer': $(ad2_resolve_dir_error "$rc")"
+    fi
+  done
+}
+
+consultant_dir_was_prompted=0
+if [[ -z $consultant_dir ]]; then
+  if (( dry_run )); then
+    ad2_die 3 "CONSULTANT_DIR is not configured. Run without --dry-run to set it up, or pass --consultant-dir."
+  fi
+  consultant_dir=$(prompt_for_consultant_dir)
+  consultant_dir_was_prompted=1
+else
+  rc=0
+  resolved=$(ad2_resolve_dir "$consultant_dir") || rc=$?
+  if (( rc != 0 )); then
+    ad2_err "CONSULTANT_DIR '$consultant_dir': $(ad2_resolve_dir_error "$rc")"
+    ad2_msg "Fix it in $config_file, or pass --consultant-dir DIR."
+    exit 3
+  fi
+  consultant_dir=$resolved
+fi
+
+if (( consultant_dir_was_prompted )); then
+  AD2_CONFIG[CONSULTANT_DIR]=$consultant_dir
+  if ad2_config_write "$config_file"; then
+    ad2_msg "Saved CONSULTANT_DIR to $config_file"
+  else
+    ad2_warn "could not write $config_file; continuing without saving"
+  fi
+  ad2_msg ""
+fi
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+declare -a consultant_argv developer_argv filemgr_argv editor_argv
+ad2_split_command consultant_argv "$consultant_command"
+ad2_split_command developer_argv  "$developer_command"
+ad2_split_command filemgr_argv    "$filemgr_command"
+ad2_split_command editor_argv     "$editor_command"
+
+((${#consultant_argv[@]})) || ad2_die 2 "CONSULTANT_COMMAND is empty"
+((${#developer_argv[@]}))  || ad2_die 2 "DEVELOPER_COMMAND is empty"
+
+# Required-for-role checks. Reported together, before anything is launched.
+missing=()
+ad2_have "${consultant_argv[0]}" || missing+=("consultant command '${consultant_argv[0]}'")
+ad2_have "${developer_argv[0]}"  || missing+=("developer command '${developer_argv[0]}'")
+
+filemgr_available=1
+editor_available=1
+if ((${#filemgr_argv[@]} == 0)) || ! ad2_have "${filemgr_argv[0]}"; then filemgr_available=0; fi
+if ((${#editor_argv[@]} == 0))  || ! ad2_have "${editor_argv[0]}";  then editor_available=0; fi
+
+if ((${#missing[@]})); then
+  ad2_err "cannot launch, missing required command(s):"
+  for m in "${missing[@]}"; do ad2_msg "  - $m"; done
+  ad2_msg ""
+  ad2_msg "Run '$AD2_ROOT/scripts/check-dependencies' for install hints,"
+  ad2_msg "or point CONSULTANT_COMMAND / DEVELOPER_COMMAND at what you have"
+  ad2_msg "in $config_file."
+  exit 4
+fi
+
+# Degraded-mode notices (never fatal).
+if (( want_files_pane )); then
+  if (( ! filemgr_available )); then
+    ad2_warn "file manager '${filemgr_argv[0]:-<unset>}' not found - the bottom pane will be a plain shell (no file browsing UI)."
+  fi
+  if (( ! editor_available )); then
+    fallback_editor=''
+    for cand in micro nano vi; do ad2_have "$cand" && { fallback_editor=$cand; break; }; done
+    if [[ -n $fallback_editor ]]; then
+      ad2_warn "editor '${editor_argv[0]:-<unset>}' not found - falling back to '$fallback_editor' in the files pane."
+    else
+      ad2_warn "editor '${editor_argv[0]:-<unset>}' not found and no fallback (micro/nano/vi) available - opening files from the file manager will fail."
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# WezTerm
+# ---------------------------------------------------------------------------
+
+if ! ad2_have wezterm && (( ! dry_run )); then
+  ad2_err "wezterm is not installed (required)."
+  ad2_msg "Run '$AD2_ROOT/scripts/check-dependencies' for install hints."
+  exit 4
+fi
+
+[[ -r $AD2_LUA_CONFIG ]] || ad2_die 4 "missing WezTerm config: $AD2_LUA_CONFIG"
+[[ -r $AD2_PANE_RUNNER ]] || ad2_die 4 "missing pane runner: $AD2_PANE_RUNNER"
+
+# A per-launch workspace name keeps re-runs independent and greppable in
+# `wezterm cli list --format json`.
+session_id="$$-$(date +%s)"
+workspace="archidev2-$(basename -- "$project_dir")-$session_id"
+
+# argv lists are handed to Lua one word per line: splitting happens exactly
+# once, here, so Bash and Lua can never disagree about it.
+join_lines() { local IFS=$'\n'; printf '%s' "$*"; }
+
+# Key bindings travel as "NAME<TAB>MODS<TAB>key" lines. Every field has
+# already been validated against a strict grammar above.
+keybind_env() {
+  local k out=''
+  for k in "${AD2_KEY_BINDING_KEYS[@]}"; do
+    out+="$k"$'\t'"${KEYBIND[$k]%% *}"$'\t'"${KEYBIND[$k]#* }"$'\n'
+  done
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# Dry run
+# ---------------------------------------------------------------------------
+
+if (( dry_run )); then
+  # printf %q gives a copy-pasteable, unambiguous rendering of every path.
+  # Nothing here prints environment variables other than the ones we set.
+  printf 'archidev2 %s -- dry run (nothing was launched)\n\n' "$AD2_VERSION"
+  printf 'repository        %q\n' "$AD2_ROOT"
+  printf 'config file       %q%s\n' "$config_file" \
+    "$([[ -e $config_file ]] && printf '' || printf '   (does not exist yet)')"
+  printf 'project dir       %q\n' "$project_dir"
+  printf 'consultant dir    %q\n' "$consultant_dir"
+  printf 'workspace         %q\n' "$workspace"
+  printf '\n'
+  printf 'consultant argv   %s\n' "$(printf '%q ' "${consultant_argv[@]}")"
+  printf 'developer argv    %s\n' "$(printf '%q ' "${developer_argv[@]}")"
+  if (( want_files_pane )); then
+    if (( filemgr_available )); then
+      printf 'files argv        %s\n' "$(printf '%q ' "${filemgr_argv[@]}")"
+    else
+      printf 'files argv        %s\n' '<file manager unavailable: plain shell>'
+    fi
+    printf 'files EDITOR      %s\n' \
+      "$( (( editor_available )) && printf '%q ' "${editor_argv[@]}" || printf '%s' '<unavailable: fallback micro/nano/vi>')"
+  else
+    printf 'files pane        disabled (--no-files-pane)\n'
+  fi
+  printf '\n'
+  printf 'key bindings\n'
+  for k in "${AD2_KEY_BINDING_KEYS[@]}"; do
+    printf '  %-30s %-18s (%s)\n' "$k" "${KEYBIND[$k]}" "$(ad2_keyspec_label "${KEYBIND[$k]}")"
+  done
+  printf '  %-30s %s\n' 'MOUSE_MENU_BUTTON' "$mouse_menu_button"
+  printf '  %-30s %s\n' 'INACTIVE_PANE_BRIGHTNESS' "$inactive_brightness"
+  printf '  %-30s %s\n' 'STARTUP_HINT' "$startup_hint"
+  printf '\n'
+  printf 'pane runner       %q\n' "$AD2_PANE_RUNNER"
+  printf 'wezterm config    %q\n' "$AD2_LUA_CONFIG"
+  printf 'wezterm binary    %s\n' "$(command -v wezterm || printf '%s' '<NOT INSTALLED>')"
+  printf '\n'
+  printf 'would run:\n'
+  printf '  ARCHIDEV2_PROJECT_DIR=%q \\\n' "$project_dir"
+  printf '  ARCHIDEV2_CONSULTANT_DIR=%q \\\n' "$consultant_dir"
+  printf '  ARCHIDEV2_WORKSPACE=%q ... \\\n' "$workspace"
+  printf '  wezterm --config-file %q start\n' "$AD2_LUA_CONFIG"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Startup hint
+# ---------------------------------------------------------------------------
+# Printed to the launching terminal, not into any pane: writing into a pane
+# would land in the AI's scrollback and be wiped by its full-screen redraw.
+if [[ $startup_hint == on ]]; then
+  ad2_msg "ArchiDev2 - how to use it"
+  ad2_msg "  1. Select text with the mouse in any pane."
+  ad2_msg "  2. Send it:   $(ad2_keyspec_label "${KEYBIND[KEY_SEND_SELECTION_CONSULTANT]}") to CONSULTANT   $(ad2_keyspec_label "${KEYBIND[KEY_SEND_SELECTION_DEVELOPER]}") to DEVELOPER"
+  ad2_msg "     or $( [[ $mouse_menu_button == off ]] && printf 'press %s' "$(ad2_keyspec_label "${KEYBIND[KEY_ACTION_MENU]}")" || printf '%s-click' "$mouse_menu_button" ) for a menu of actions."
+  ad2_msg "  3. Focus follows the text; nothing is ever submitted for you."
+  ad2_msg "  4. Selection sending works in CONSULTANT and DEVELOPER. From Micro,"
+  ad2_msg "     copy with Ctrl+C and use a 'Send clipboard' action instead."
+  ad2_msg "  5. Press $(ad2_keyspec_label "${KEYBIND[KEY_HELP]}") in the window for help. (--quiet hides this.)"
+  ad2_msg ""
+fi
+
+# ---------------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------------
+
+# `--always-new-process` guarantees a fresh mux (and therefore a fresh
+# `wezterm cli` socket) per launch. It is not present on very old versions,
+# so probe for it rather than failing hard.
+start_args=(start)
+if wezterm start --help 2>/dev/null | grep -q -- '--always-new-process'; then
+  start_args=(start --always-new-process)
+fi
+
+# Everything the Lua config needs travels as environment. Panes inherit the
+# GUI process environment, so the pane runner sees these too.
+exec env \
+  ARCHIDEV2_HOME="$AD2_ROOT" \
+  ARCHIDEV2_PANE_RUNNER="$AD2_PANE_RUNNER" \
+  ARCHIDEV2_PROJECT_DIR="$project_dir" \
+  ARCHIDEV2_CONSULTANT_DIR="$consultant_dir" \
+  ARCHIDEV2_WORKSPACE="$workspace" \
+  ARCHIDEV2_SESSION_ID="$session_id" \
+  ARCHIDEV2_CONSULTANT_ARGV="$(join_lines "${consultant_argv[@]}")" \
+  ARCHIDEV2_DEVELOPER_ARGV="$(join_lines "${developer_argv[@]}")" \
+  ARCHIDEV2_FILES_ARGV="$( ((want_files_pane && filemgr_available)) && join_lines "${filemgr_argv[@]}" || printf '')" \
+  ARCHIDEV2_WANT_FILES_PANE="$want_files_pane" \
+  ARCHIDEV2_EDITOR_COMMAND="$( ((editor_available)) && printf '%s' "$editor_command" || printf '')" \
+  ARCHIDEV2_KEYS="$(keybind_env)" \
+  ARCHIDEV2_MOUSE_MENU_BUTTON="$mouse_menu_button" \
+  ARCHIDEV2_INACTIVE_BRIGHTNESS="$inactive_brightness" \
+  ARCHIDEV2_STARTUP_HINT="$startup_hint" \
+  wezterm --config-file "$AD2_LUA_CONFIG" "${start_args[@]}"

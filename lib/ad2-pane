@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# archidev-pane - the program every ArchiDev-Flow pane actually runs.
+# ad2-pane - the program every ArchiDev2 pane actually runs.
 #
-#   archidev-pane <role> [command [args...]]
+#   ad2-pane <role> [command [args...]]
 #
 # Responsibilities:
 #   1. Tag the pane with a stable identity (OSC 1337 user var + OSC 0 title)
@@ -10,6 +10,10 @@
 #   2. Set EDITOR/VISUAL for the files pane only - never globally.
 #   3. Run the requested command, and when it exits leave a usable interactive
 #      shell behind instead of destroying the pane.
+#
+# Output discipline: this script writes two short lines when a command exits,
+# and nothing else. Guidance lives in the status bar and the Alt+H overlay so
+# that AI sessions and their scrollback stay clean.
 #
 # Deliberately not `set -e`: a failing AI command must not kill the pane.
 set -uo pipefail
@@ -19,9 +23,9 @@ shift || true
 
 # --- pane identity ---------------------------------------------------------
 # WezTerm reads OSC 1337 SetUserVar and exposes it to Lua via
-# pane:get_user_vars(). The value must be base64. This is what makes
-# "send selection to Consultant" reliable even after a config reload, and it
-# is scoped to this pane only.
+# pane:get_user_vars() and via PaneInformation.user_vars in status events.
+# The value must be base64. This is what makes "send selection to CONSULTANT"
+# reliable, and it is scoped to this pane only.
 set_user_var() {
   local name=$1 value=$2 b64
   command -v base64 >/dev/null 2>&1 || return 0
@@ -30,14 +34,15 @@ set_user_var() {
 }
 
 case $role in
-  consultant) title='ArchiDev Consultant' ;;
-  developer)  title='ArchiDev Developer' ;;
-  files)      title='ArchiDev Files' ;;
-  *)          title="ArchiDev ${role}" ;;
+  consultant) label='CONSULTANT' ;;
+  developer)  label='DEVELOPER' ;;
+  files)      label='FILES' ;;
+  *)          label=${role^^} ;;
 esac
+title="ArchiDev2 $label"
 
-set_user_var ARCHIDEV_ROLE "$role"
-set_user_var ARCHIDEV_SESSION "${ARCHIDEV_SESSION_ID:-unknown}"
+set_user_var ARCHIDEV2_ROLE "$role"
+set_user_var ARCHIDEV2_SESSION "${ARCHIDEV2_SESSION_ID:-unknown}"
 printf '\033]0;%s\007' "$title"
 
 # --- files pane: editor wiring --------------------------------------------
@@ -45,7 +50,7 @@ printf '\033]0;%s\007' "$title"
 # pane) opens the configured editor. The user's login shell config is never
 # touched.
 if [[ $role == files ]]; then
-  editor=${ARCHIDEV_EDITOR_COMMAND:-}
+  editor=${ARCHIDEV2_EDITOR_COMMAND:-}
   if [[ -z $editor ]]; then
     for cand in micro nano vi; do
       if command -v -- "$cand" >/dev/null 2>&1; then editor=$cand; break; fi
@@ -54,12 +59,12 @@ if [[ $role == files ]]; then
   if [[ -n $editor ]]; then
     export EDITOR=$editor VISUAL=$editor
   else
-    printf '\033[33marchidev: no editor found (tried micro, nano, vi).\033[0m\n'
-    printf '\033[33m          Set EDITOR_COMMAND in the ArchiDev config.\033[0m\n'
+    printf '\033[33marchidev2: no editor found (tried micro, nano, vi).\033[0m\n'
+    printf '\033[33m           Set EDITOR_COMMAND in the ArchiDev2 config.\033[0m\n'
   fi
 fi
 
-banner() { printf '\033[2m%s\033[0m\n' "$*"; }
+dim() { printf '\033[2m%s\033[0m\n' "$*"; }
 
 # --- run the command -------------------------------------------------------
 status=0
@@ -68,22 +73,18 @@ if (($#)); then
     "$@"
     status=$?
   else
-    printf '\033[31marchidev: command not found: %s\033[0m\n' "$1"
+    printf '\033[31marchidev2: command not found: %s\033[0m\n' "$1"
     status=127
   fi
 else
-  banner "archidev: no command configured for the '$role' pane."
+  dim "archidev2: no command configured for the '$role' pane."
 fi
 
 # --- keep the pane usable --------------------------------------------------
-banner "----------------------------------------------------------------"
-banner "archidev: '$role' command exited with status $status."
-banner "This pane is now a plain shell; re-run the command or close it."
-banner "----------------------------------------------------------------"
-
-# Re-tag: the exited program may have changed the pane title. The user var is
-# still set, but refreshing both is cheap and keeps routing discoverable.
-set_user_var ARCHIDEV_ROLE "$role"
+# Two lines, not a banner: this runs again every time the user exits a shell,
+# so it must stay small.
+dim "archidev2: $label exited (status $status) - this pane is now a shell."
+set_user_var ARCHIDEV2_ROLE "$role"
 printf '\033]0;%s (shell)\007' "$title"
 
 exec "${SHELL:-/bin/bash}" -i
