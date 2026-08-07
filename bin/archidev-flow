@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+#
+# archidev-flow - launch a WezTerm workspace with an AI consultant pane,
+#                 an AI developer pane and a project file pane.
+#
+# Usage:  archidev-flow [OPTIONS] [PROJECT_DIR]
+#
+set -euo pipefail
+
+# Resolve our own location so the script works from a symlink on PATH and
+# directly out of a development checkout.
+_adf_self=${BASH_SOURCE[0]}
+while [[ -L $_adf_self ]]; do
+  _adf_target=$(readlink -- "$_adf_self")
+  if [[ $_adf_target == /* ]]; then
+    _adf_self=$_adf_target
+  else
+    _adf_self=$(dirname -- "$_adf_self")/$_adf_target
+  fi
+done
+ADF_ROOT=$(CDPATH= cd -P -- "$(dirname -- "$_adf_self")/.." && pwd -P)
+unset _adf_self _adf_target
+
+# shellcheck source=../lib/archidev-lib.sh
+source "$ADF_ROOT/lib/archidev-lib.sh"
+
+ADF_VERSION='0.1.0 (prototype)'
+ADF_LUA_CONFIG="$ADF_ROOT/wezterm/archidev-flow.lua"
+ADF_PANE_RUNNER="$ADF_ROOT/lib/archidev-pane"
+
+usage() {
+  cat <<EOF
+archidev-flow $ADF_VERSION
+
+Launch a WezTerm workspace: AI consultant (left), AI developer (right),
+project files (bottom).
+
+Usage:
+  archidev-flow [OPTIONS] [PROJECT_DIR]
+
+  PROJECT_DIR defaults to the current directory.
+
+Options:
+  -n, --dry-run           Resolve and validate everything, print what would
+                          launch, then exit. Does not start WezTerm.
+      --check-deps        Run the dependency check and exit.
+  -c, --config FILE       Use FILE instead of \$XDG_CONFIG_HOME/archidev-flow/config
+      --consultant-dir D  Override CONSULTANT_DIR for this launch only.
+      --no-files-pane     Do not create the bottom file-manager pane.
+      --print-config-path Print the config file path and exit.
+  -h, --help              This help.
+  -V, --version           Print version.
+
+Configuration: $(adf_config_file)
+Docs:          $ADF_ROOT/README.md
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+dry_run=0
+check_deps_only=0
+config_file=''
+consultant_dir_override=''
+want_files_pane=1
+project_arg=''
+saw_project=0
+
+while (($#)); do
+  case $1 in
+    -n|--dry-run)      dry_run=1 ;;
+    --check-deps)      check_deps_only=1 ;;
+    -c|--config)
+      [[ $# -ge 2 ]] || adf_die 2 "--config requires an argument"
+      config_file=$2; shift ;;
+    --config=*)        config_file=${1#*=} ;;
+    --consultant-dir)
+      [[ $# -ge 2 ]] || adf_die 2 "--consultant-dir requires an argument"
+      consultant_dir_override=$2; shift ;;
+    --consultant-dir=*) consultant_dir_override=${1#*=} ;;
+    --no-files-pane)   want_files_pane=0 ;;
+    --print-config-path) adf_config_file; exit 0 ;;
+    -h|--help)         usage; exit 0 ;;
+    -V|--version)      printf 'archidev-flow %s\n' "$ADF_VERSION"; exit 0 ;;
+    --)                shift
+                       if (($#)); then project_arg=$1; saw_project=1; shift; fi
+                       (($#)) && adf_die 2 "unexpected extra argument: $1"
+                       break ;;
+    -*)                adf_die 2 "unknown option: $1 (try --help)" ;;
+    *)
+      (( saw_project )) && adf_die 2 "unexpected extra argument: $1"
+      project_arg=$1; saw_project=1 ;;
+  esac
+  shift
+done
+
+if (( check_deps_only )); then
+  exec "$ADF_ROOT/scripts/check-dependencies"
+fi
+
+[[ -n $project_arg ]] || project_arg='.'
+[[ -n $config_file ]] || config_file=$(adf_config_file)
+
+# ---------------------------------------------------------------------------
+# Project directory
+# ---------------------------------------------------------------------------
+
+# `rc=$?` after `if ! cmd` would read the *negated* status, so capture the
+# real exit code with `|| rc=$?` instead. Same pattern everywhere below.
+rc=0
+project_dir=$(adf_resolve_dir "$project_arg") || rc=$?
+if (( rc != 0 )); then
+  adf_die 2 "project directory '$project_arg': $(adf_resolve_dir_error "$rc")"
+fi
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+adf_config_load "$config_file" || exit 1
+
+consultant_command=$(adf_config_get CONSULTANT_COMMAND   "$ADF_DEFAULT_CONSULTANT_COMMAND")
+developer_command=$(adf_config_get  DEVELOPER_COMMAND    "$ADF_DEFAULT_DEVELOPER_COMMAND")
+filemgr_command=$(adf_config_get    FILE_MANAGER_COMMAND "$ADF_DEFAULT_FILE_MANAGER_COMMAND")
+editor_command=$(adf_config_get     EDITOR_COMMAND       "$ADF_DEFAULT_EDITOR_COMMAND")
+consultant_dir=$(adf_config_get     CONSULTANT_DIR       '')
+
+if [[ -n $consultant_dir_override ]]; then
+  consultant_dir=$consultant_dir_override
+fi
+
+# --- first run: ask for the consultant directory ---------------------------
+#
+# Only reached when CONSULTANT_DIR is unset. Writes exactly one file, under
+# the XDG config dir, after the user confirms.
+prompt_for_consultant_dir() {
+  local suggestion answer resolved rc create
+  suggestion="${HOME:?HOME is not set}/archidev-consultant"
+
+  # This function's stdout is captured by a command substitution (it returns
+  # the chosen directory), so stdout is a pipe even on a terminal. The prompts
+  # go to stderr, so stderr + stdin are what must be interactive.
+  if [[ ! -t 0 || ! -t 2 ]]; then
+    adf_err "CONSULTANT_DIR is not configured and this is not an interactive terminal."
+    adf_msg  ""
+    adf_msg  "Set it non-interactively with either:"
+    adf_msg  "  archidev-flow --consultant-dir /path/to/consultant ..."
+    adf_msg  "or by creating $config_file containing:"
+    adf_msg  "  CONSULTANT_DIR='/path/to/consultant'"
+    exit 3
+  fi
+
+  adf_msg "First run: ArchiDev-Flow needs a consultant working directory."
+  adf_msg "This is where the consultant AI ($consultant_command) will start."
+  adf_msg "It is remembered in $config_file and is separate from your project."
+  adf_msg ""
+
+  while true; do
+    printf 'Consultant directory [%s]: ' "$suggestion" >&2
+    IFS= read -r answer || { adf_msg ''; adf_die 3 "aborted"; }
+    [[ -n $answer ]] || answer=$suggestion
+    # Expand a leading ~ ourselves; we never eval user input.
+    if [[ $answer == '~' ]]; then
+      answer=$HOME
+    elif [[ $answer == '~/'* ]]; then
+      answer=$HOME/${answer#'~/'}
+    fi
+
+    rc=0
+    resolved=$(adf_resolve_dir "$answer") || rc=$?
+    if (( rc == 0 )); then
+      printf '%s' "$resolved"
+      return 0
+    fi
+    if (( rc == 3 )); then
+      printf "Directory '%s' does not exist. Create it? [y/N] " "$answer" >&2
+      IFS= read -r create || create=''
+      if [[ $create == [Yy]* ]]; then
+        if mkdir -p -- "$answer" && resolved=$(adf_resolve_dir "$answer") \
+           && [[ -n $resolved ]]; then
+          printf '%s' "$resolved"
+          return 0
+        fi
+        adf_err "could not create '$answer'"
+        continue
+      fi
+      adf_err "not created; please choose another directory"
+    else
+      adf_err "'$answer': $(adf_resolve_dir_error "$rc")"
+    fi
+  done
+}
+
+consultant_dir_was_prompted=0
+if [[ -z $consultant_dir ]]; then
+  if (( dry_run )); then
+    adf_die 3 "CONSULTANT_DIR is not configured. Run without --dry-run to set it up, or pass --consultant-dir."
+  fi
+  consultant_dir=$(prompt_for_consultant_dir)
+  consultant_dir_was_prompted=1
+else
+  rc=0
+  resolved=$(adf_resolve_dir "$consultant_dir") || rc=$?
+  if (( rc != 0 )); then
+    adf_err "CONSULTANT_DIR '$consultant_dir': $(adf_resolve_dir_error "$rc")"
+    adf_msg "Fix it in $config_file, or pass --consultant-dir DIR."
+    exit 3
+  fi
+  consultant_dir=$resolved
+fi
+
+if (( consultant_dir_was_prompted )); then
+  ADF_CONFIG[CONSULTANT_DIR]=$consultant_dir
+  if adf_config_write "$config_file"; then
+    adf_msg "Saved CONSULTANT_DIR to $config_file"
+  else
+    adf_warn "could not write $config_file; continuing without saving"
+  fi
+  adf_msg ""
+fi
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+declare -a consultant_argv developer_argv filemgr_argv editor_argv
+adf_split_command consultant_argv "$consultant_command"
+adf_split_command developer_argv  "$developer_command"
+adf_split_command filemgr_argv    "$filemgr_command"
+adf_split_command editor_argv     "$editor_command"
+
+((${#consultant_argv[@]})) || adf_die 2 "CONSULTANT_COMMAND is empty"
+((${#developer_argv[@]}))  || adf_die 2 "DEVELOPER_COMMAND is empty"
+
+# Required-for-role checks. Reported together, before anything is launched.
+missing=()
+adf_have "${consultant_argv[0]}" || missing+=("consultant command '${consultant_argv[0]}'")
+adf_have "${developer_argv[0]}"  || missing+=("developer command '${developer_argv[0]}'")
+
+filemgr_available=1
+editor_available=1
+if ((${#filemgr_argv[@]} == 0)) || ! adf_have "${filemgr_argv[0]}"; then filemgr_available=0; fi
+if ((${#editor_argv[@]} == 0))  || ! adf_have "${editor_argv[0]}";  then editor_available=0; fi
+
+if ((${#missing[@]})); then
+  adf_err "cannot launch, missing required command(s):"
+  for m in "${missing[@]}"; do adf_msg "  - $m"; done
+  adf_msg ""
+  adf_msg "Run '$ADF_ROOT/scripts/check-dependencies' for install hints,"
+  adf_msg "or point CONSULTANT_COMMAND / DEVELOPER_COMMAND at what you have"
+  adf_msg "in $config_file."
+  exit 4
+fi
+
+# Degraded-mode notices (never fatal).
+if (( want_files_pane )); then
+  if (( ! filemgr_available )); then
+    adf_warn "file manager '${filemgr_argv[0]:-<unset>}' not found - the bottom pane will be a plain shell (no file browsing UI)."
+  fi
+  if (( ! editor_available )); then
+    fallback_editor=''
+    for cand in micro nano vi; do adf_have "$cand" && { fallback_editor=$cand; break; }; done
+    if [[ -n $fallback_editor ]]; then
+      adf_warn "editor '${editor_argv[0]:-<unset>}' not found - falling back to '$fallback_editor' in the files pane."
+    else
+      adf_warn "editor '${editor_argv[0]:-<unset>}' not found and no fallback (micro/nano/vi) available - opening files from the file manager will fail."
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# WezTerm
+# ---------------------------------------------------------------------------
+
+if ! adf_have wezterm && (( ! dry_run )); then
+  adf_err "wezterm is not installed (required)."
+  adf_msg "Run '$ADF_ROOT/scripts/check-dependencies' for install hints."
+  exit 4
+fi
+
+[[ -r $ADF_LUA_CONFIG ]] || adf_die 4 "missing WezTerm config: $ADF_LUA_CONFIG"
+[[ -r $ADF_PANE_RUNNER ]] || adf_die 4 "missing pane runner: $ADF_PANE_RUNNER"
+
+# A per-launch workspace name keeps re-runs independent and greppable in
+# `wezterm cli list --format json`.
+session_id="$$-$(date +%s)"
+workspace="archidev-$(basename -- "$project_dir")-$session_id"
+
+# argv lists are handed to Lua one word per line: splitting happens exactly
+# once, here, so Bash and Lua can never disagree about it.
+join_lines() { local IFS=$'\n'; printf '%s' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Dry run
+# ---------------------------------------------------------------------------
+
+if (( dry_run )); then
+  # printf %q gives a copy-pasteable, unambiguous rendering of every path.
+  # Nothing here prints environment variables other than the ones we set.
+  printf 'archidev-flow %s -- dry run (nothing was launched)\n\n' "$ADF_VERSION"
+  printf 'repository        %q\n' "$ADF_ROOT"
+  printf 'config file       %q%s\n' "$config_file" \
+    "$([[ -e $config_file ]] && printf '' || printf '   (does not exist yet)')"
+  printf 'project dir       %q\n' "$project_dir"
+  printf 'consultant dir    %q\n' "$consultant_dir"
+  printf 'workspace         %q\n' "$workspace"
+  printf '\n'
+  printf 'consultant argv   %s\n' "$(printf '%q ' "${consultant_argv[@]}")"
+  printf 'developer argv    %s\n' "$(printf '%q ' "${developer_argv[@]}")"
+  if (( want_files_pane )); then
+    if (( filemgr_available )); then
+      printf 'files argv        %s\n' "$(printf '%q ' "${filemgr_argv[@]}")"
+    else
+      printf 'files argv        %s\n' '<file manager unavailable: plain shell>'
+    fi
+    printf 'files EDITOR      %s\n' \
+      "$( (( editor_available )) && printf '%q ' "${editor_argv[@]}" || printf '%s' '<unavailable: fallback micro/nano/vi>')"
+  else
+    printf 'files pane        disabled (--no-files-pane)\n'
+  fi
+  printf '\n'
+  printf 'pane runner       %q\n' "$ADF_PANE_RUNNER"
+  printf 'wezterm config    %q\n' "$ADF_LUA_CONFIG"
+  printf 'wezterm binary    %s\n' "$(command -v wezterm || printf '%s' '<NOT INSTALLED>')"
+  printf '\n'
+  printf 'would run:\n'
+  printf '  ARCHIDEV_PROJECT_DIR=%q \\\n' "$project_dir"
+  printf '  ARCHIDEV_CONSULTANT_DIR=%q \\\n' "$consultant_dir"
+  printf '  ARCHIDEV_WORKSPACE=%q ... \\\n' "$workspace"
+  printf '  wezterm --config-file %q start\n' "$ADF_LUA_CONFIG"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------------
+
+# `--always-new-process` guarantees a fresh mux (and therefore a fresh
+# `wezterm cli` socket) per launch. It is not present on very old versions,
+# so probe for it rather than failing hard.
+start_args=(start)
+if wezterm start --help 2>/dev/null | grep -q -- '--always-new-process'; then
+  start_args=(start --always-new-process)
+fi
+
+# Everything the Lua config needs travels as environment. Panes inherit the
+# GUI process environment, so the pane runner sees these too.
+exec env \
+  ARCHIDEV_HOME="$ADF_ROOT" \
+  ARCHIDEV_PANE_RUNNER="$ADF_PANE_RUNNER" \
+  ARCHIDEV_PROJECT_DIR="$project_dir" \
+  ARCHIDEV_CONSULTANT_DIR="$consultant_dir" \
+  ARCHIDEV_WORKSPACE="$workspace" \
+  ARCHIDEV_SESSION_ID="$session_id" \
+  ARCHIDEV_CONSULTANT_ARGV="$(join_lines "${consultant_argv[@]}")" \
+  ARCHIDEV_DEVELOPER_ARGV="$(join_lines "${developer_argv[@]}")" \
+  ARCHIDEV_FILES_ARGV="$( ((want_files_pane && filemgr_available)) && join_lines "${filemgr_argv[@]}" || printf '')" \
+  ARCHIDEV_WANT_FILES_PANE="$want_files_pane" \
+  ARCHIDEV_EDITOR_COMMAND="$( ((editor_available)) && printf '%s' "$editor_command" || printf '')" \
+  wezterm --config-file "$ADF_LUA_CONFIG" "${start_args[@]}"

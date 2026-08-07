@@ -1,0 +1,35 @@
+# ArchiDev-Flow configuration example
+#
+# Copy to:  ${XDG_CONFIG_HOME:-$HOME/.config}/archidev-flow/config
+#
+# Format
+#   KEY=VALUE, one per line. Blank lines and lines starting with # are ignored.
+#   Whitespace around KEY and VALUE is trimmed.
+#   One layer of matching surrounding single or double quotes is removed.
+#   Values are LITERAL: no $variable expansion, no backslash escapes, no
+#   globbing, no command substitution. Nothing here is ever passed to a shell.
+#   Unknown keys are ignored with a warning.
+#
+# Command format
+#   *_COMMAND values are whitespace-separated argv lists:
+#       CONSULTANT_COMMAND='codex --model gpt-5'  ->  argv: codex, --model, gpt-5
+#   There is no quoting *inside* a command value, so an argument cannot
+#   contain a space. The first word must be on PATH or an absolute path.
+
+# Where the consultant AI starts. Absolute path, must already exist.
+# Asked for interactively on first run if unset.
+CONSULTANT_DIR='/home/example/archidev-consultant'
+
+# Consultant AI. Default: codex
+CONSULTANT_COMMAND='codex'
+
+# Developer AI, started in the selected project directory. Default: claude
+DEVELOPER_COMMAND='claude'
+
+# Bottom pane file manager, started in the project directory. Default: yazi
+# If missing, the bottom pane becomes a plain shell.
+FILE_MANAGER_COMMAND='yazi'
+
+# Editor exported as EDITOR/VISUAL for the files pane only. Default: micro
+# If missing, ArchiDev falls back to micro, then nano, then vi.
+EDITOR_COMMAND='micro'

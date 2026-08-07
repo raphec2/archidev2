@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# check-dependencies - report what ArchiDev-Flow needs and what is missing.
+#
+# Never installs anything. Exit status:
+#   0  everything required is present
+#   1  at least one required dependency is missing
+#
+set -uo pipefail
+
+_self=${BASH_SOURCE[0]}
+while [[ -L $_self ]]; do
+  _t=$(readlink -- "$_self")
+  [[ $_t == /* ]] && _self=$_t || _self=$(dirname -- "$_self")/$_t
+done
+ADF_ROOT=$(CDPATH= cd -P -- "$(dirname -- "$_self")/.." && pwd -P)
+# shellcheck source=../lib/archidev-lib.sh
+source "$ADF_ROOT/lib/archidev-lib.sh"
+
+use_colour=0
+[[ -t 1 ]] && use_colour=1
+c() { (( use_colour )) && printf '\033[%sm' "$1"; }
+green() { c 32; }; red() { c 31; }; yellow() { c 33; }; dim() { c 2; }; reset() { c 0; }
+
+missing_required=0
+
+# report <kind> <command> <why> <install hint>
+report() {
+  local kind=$1 cmd=$2 why=$3 hint=$4 path
+  if path=$(command -v -- "$cmd" 2>/dev/null); then
+    green; printf '  [ok]      '; reset
+    printf '%-10s %s\n' "$cmd" "$path"
+    return 0
+  fi
+  if [[ $kind == required ]]; then
+    red; printf '  [MISSING] '; reset
+    missing_required=$((missing_required + 1))
+  else
+    yellow; printf '  [absent]  '; reset
+  fi
+  printf '%-10s %s\n' "$cmd" "$why"
+  dim; printf '            install: %s\n' "$hint"; reset
+  return 1
+}
+
+printf 'ArchiDev-Flow dependency check\n'
+printf 'repository: %s\n\n' "$ADF_ROOT"
+
+# What is actually configured (so we check the user's real commands).
+config_file=${1:-$(adf_config_file)}
+adf_config_load "$config_file" >/dev/null 2>&1 || true
+consultant_cmd=$(adf_config_get CONSULTANT_COMMAND   "$ADF_DEFAULT_CONSULTANT_COMMAND")
+developer_cmd=$(adf_config_get  DEVELOPER_COMMAND    "$ADF_DEFAULT_DEVELOPER_COMMAND")
+filemgr_cmd=$(adf_config_get    FILE_MANAGER_COMMAND "$ADF_DEFAULT_FILE_MANAGER_COMMAND")
+editor_cmd=$(adf_config_get     EDITOR_COMMAND       "$ADF_DEFAULT_EDITOR_COMMAND")
+
+declare -a a
+adf_split_command a "$consultant_cmd"; consultant_bin=${a[0]:-}
+adf_split_command a "$developer_cmd";  developer_bin=${a[0]:-}
+adf_split_command a "$filemgr_cmd";    filemgr_bin=${a[0]:-}
+adf_split_command a "$editor_cmd";     editor_bin=${a[0]:-}
+
+printf 'Required\n'
+report required bash 'the launcher is written in Bash 4+' \
+  'already present on every supported distro'
+report required wezterm 'owns the window, panes, selection and text routing' \
+  'Debian/Ubuntu/Mint: see https://wezterm.org/install/linux.html (apt repo or .deb) | Fedora: dnf copr enable wezfurlong/wezterm-nightly | Arch: pacman -S wezterm | flatpak install flathub org.wezfurlong.wezterm'
+report required "$consultant_bin" "consultant AI (CONSULTANT_COMMAND=$consultant_cmd)" \
+  'npm install -g @openai/codex  (or set CONSULTANT_COMMAND to something you have)'
+report required "$developer_bin" "developer AI (DEVELOPER_COMMAND=$developer_cmd)" \
+  'npm install -g @anthropic-ai/claude-code  (or set DEVELOPER_COMMAND)'
+
+printf '\nOptional\n'
+report optional "$filemgr_bin" "file manager for the bottom pane (FILE_MANAGER_COMMAND=$filemgr_cmd); without it that pane is a plain shell" \
+  'Debian/Ubuntu/Mint: apt install yazi (24.10+) or cargo install --locked yazi-fm yazi-cli | Fedora: dnf install yazi | Arch: pacman -S yazi'
+report optional "$editor_bin" "terminal editor opened from the file manager (EDITOR_COMMAND=$editor_cmd); without it ArchiDev falls back to nano or vi" \
+  'Debian/Ubuntu/Mint: apt install micro | Fedora: dnf install micro | Arch: pacman -S micro'
+report optional base64 'tags panes with their ArchiDev role for reliable text routing; without it routing falls back to pane ids recorded at startup' \
+  'part of GNU coreutils'
+
+printf '\nOptional editor fallbacks\n'
+for e in micro nano vi; do
+  if p=$(command -v -- "$e" 2>/dev/null); then
+    green; printf '  [ok]      '; reset; printf '%-10s %s\n' "$e" "$p"
+  else
+    dim;   printf '  [absent]  %s\n' "$e"; reset
+  fi
+done
+
+printf '\nConfiguration\n'
+if [[ -e $config_file ]]; then
+  green; printf '  [ok]      '; reset; printf 'config    %s\n' "$config_file"
+  if [[ -n ${ADF_CONFIG[CONSULTANT_DIR]:-} ]]; then
+    if [[ -d ${ADF_CONFIG[CONSULTANT_DIR]} ]]; then
+      green; printf '  [ok]      '; reset
+      printf 'consultant dir %s\n' "${ADF_CONFIG[CONSULTANT_DIR]}"
+    else
+      red; printf '  [BAD]     '; reset
+      printf 'CONSULTANT_DIR does not exist: %s\n' "${ADF_CONFIG[CONSULTANT_DIR]}"
+      missing_required=$((missing_required + 1))
+    fi
+  else
+    yellow; printf '  [absent]  '; reset
+    printf 'CONSULTANT_DIR not set - you will be prompted on first launch\n'
+  fi
+else
+  yellow; printf '  [absent]  '; reset
+  printf 'config    %s (created on first launch)\n' "$config_file"
+fi
+
+printf '\n'
+if (( missing_required )); then
+  red; printf 'Result: %d required item(s) missing or invalid.\n' "$missing_required"; reset
+  printf 'Nothing was installed. Install the items above, or point the matching\n'
+  printf 'config key at a command you already have.\n'
+  exit 1
+fi
+green; printf 'Result: all required dependencies present.\n'; reset
+exit 0

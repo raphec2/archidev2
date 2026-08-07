@@ -1,0 +1,542 @@
+#!/usr/bin/env bash
+#
+# run-tests - non-GUI validation for ArchiDev-Flow.
+#
+# Everything here is safe: it works in temporary directories, never touches
+# the real user config, and never starts WezTerm.
+#
+set -uo pipefail
+
+_self=${BASH_SOURCE[0]}
+while [[ -L $_self ]]; do
+  _t=$(readlink -- "$_self")
+  [[ $_t == /* ]] && _self=$_t || _self=$(dirname -- "$_self")/$_t
+done
+ROOT=$(CDPATH= cd -P -- "$(dirname -- "$_self")/.." && pwd -P)
+
+# Sandbox: HOME and XDG_CONFIG_HOME are redirected for the whole run so no
+# test can reach the developer's real configuration.
+SANDBOX=$(mktemp -d -t archidev-tests.XXXXXX)
+trap 'rm -rf -- "$SANDBOX"' EXIT
+export HOME="$SANDBOX/home"
+export XDG_CONFIG_HOME="$SANDBOX/home/.config"
+mkdir -p "$HOME"
+
+# shellcheck source=../lib/archidev-lib.sh
+source "$ROOT/lib/archidev-lib.sh"
+
+pass=0; fail=0
+ok()   { pass=$((pass+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
+bad()  { fail=$((fail+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
+note() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+assert_eq() { # <desc> <expected> <actual>
+  if [[ $2 == "$3" ]]; then ok "$1"; else
+    bad "$1"; printf '       expected: %q\n       actual:   %q\n' "$2" "$3"
+  fi
+}
+assert_rc() { # <desc> <expected-rc> <actual-rc>
+  if (( $2 == $3 )); then ok "$1"; else
+    bad "$1"; printf '       expected rc %d, got %d\n' "$2" "$3"
+  fi
+}
+assert_contains() { # <desc> <needle> <haystack>
+  if [[ $3 == *"$2"* ]]; then ok "$1"; else
+    bad "$1"; printf '       missing: %q\n       in: %s\n' "$2" "$3"
+  fi
+}
+assert_not_contains() {
+  if [[ $3 != *"$2"* ]]; then ok "$1"; else
+    bad "$1"; printf '       unexpectedly found: %q\n' "$2"
+  fi
+}
+
+FLOW="$ROOT/bin/archidev-flow"
+
+# ---------------------------------------------------------------------------
+note '1. Bash syntax'
+# ---------------------------------------------------------------------------
+for f in "$ROOT/bin/archidev-flow" "$ROOT/lib/archidev-lib.sh" \
+         "$ROOT/lib/archidev-pane" "$ROOT/scripts/check-dependencies" \
+         "$ROOT/tests/run-tests"; do
+  if bash -n "$f" 2>/dev/null; then ok "syntax: ${f#"$ROOT/"}"
+  else bad "syntax: ${f#"$ROOT/"}"; bash -n "$f"; fi
+done
+
+for f in "$ROOT/bin/archidev-flow" "$ROOT/lib/archidev-pane" \
+         "$ROOT/scripts/check-dependencies" "$ROOT/tests/run-tests"; do
+  [[ -x $f ]] && ok "executable: ${f#"$ROOT/"}" || bad "executable: ${f#"$ROOT/"}"
+done
+
+# Strip comments before looking, so the word "eval" in prose does not trip it.
+eval_hits=$(grep -rn -E '(^|[^[:alnum:]_])eval([[:space:]]|$)' \
+  "$ROOT/bin" "$ROOT/lib" "$ROOT/scripts" 2>/dev/null | grep -v -E ':[[:space:]]*#' || true)
+if [[ -n $eval_hits ]]; then
+  bad 'no eval anywhere in the shell code'; printf '%s\n' "$eval_hits"
+else
+  ok 'no eval anywhere in the shell code'
+fi
+
+# ---------------------------------------------------------------------------
+note '2. XDG config locations'
+# ---------------------------------------------------------------------------
+assert_eq 'config file honours XDG_CONFIG_HOME' \
+  "$XDG_CONFIG_HOME/archidev-flow/config" "$(adf_config_file)"
+
+( export XDG_CONFIG_HOME=''
+  assert_eq 'falls back to ~/.config when XDG_CONFIG_HOME is empty' \
+    "$HOME/.config/archidev-flow/config" "$(adf_config_file)" )
+
+( export XDG_CONFIG_HOME='relative/path'
+  assert_eq 'ignores a relative XDG_CONFIG_HOME (per spec)' \
+    "$HOME/.config/archidev-flow/config" "$(adf_config_file)" )
+
+# ---------------------------------------------------------------------------
+note '3. Config parsing'
+# ---------------------------------------------------------------------------
+cfg="$SANDBOX/cfg1"
+cat >"$cfg" <<'EOF'
+# a comment
+   # indented comment
+
+CONSULTANT_DIR='/tmp/dir with spaces'
+CONSULTANT_COMMAND = codex --model gpt-5
+DEVELOPER_COMMAND="claude"
+FILE_MANAGER_COMMAND=yazi
+EDITOR_COMMAND='micro'
+EOF
+adf_config_load "$cfg" 2>/dev/null
+assert_eq 'single-quoted value with spaces' '/tmp/dir with spaces' "$(adf_config_get CONSULTANT_DIR)"
+assert_eq 'whitespace around key and = trimmed' 'codex --model gpt-5' "$(adf_config_get CONSULTANT_COMMAND)"
+assert_eq 'double-quoted value' 'claude' "$(adf_config_get DEVELOPER_COMMAND)"
+assert_eq 'bare value' 'yazi' "$(adf_config_get FILE_MANAGER_COMMAND)"
+
+cfg2="$SANDBOX/cfg2"
+cat >"$cfg2" <<'EOF'
+CONSULTANT_DIR='/tmp/$HOME/`whoami`/$(id -u)/*'
+DEVELOPER_COMMAND='claude'
+UNKNOWN_KEY=whatever
+9BAD=x
+noequalsign
+EOF
+# adf_config_load must run in *this* shell, so capture stderr via a file
+# instead of a command substitution (which would discard ADF_CONFIG).
+adf_config_load "$cfg2" 2>"$SANDBOX/warn2"
+warnings=$(cat "$SANDBOX/warn2")
+assert_eq 'shell metacharacters are never expanded' \
+  '/tmp/$HOME/`whoami`/$(id -u)/*' "$(adf_config_get CONSULTANT_DIR)"
+assert_contains 'unknown key warns' 'ignoring unknown key: UNKNOWN_KEY' "$warnings"
+assert_contains 'invalid key name warns' 'ignoring invalid key' "$warnings"
+assert_contains 'line without = warns' "ignoring line without '='" "$warnings"
+assert_eq 'unknown key is not stored' '' "$(adf_config_get UNKNOWN_KEY)"
+
+adf_config_load "$SANDBOX/does-not-exist"
+assert_rc 'missing config file is not an error' 0 $?
+assert_eq 'missing config yields no values' '' "$(adf_config_get CONSULTANT_DIR)"
+
+# ---------------------------------------------------------------------------
+note '4. Config writing (round-trip)'
+# ---------------------------------------------------------------------------
+roundtrip() { # <desc> <value>
+  local desc=$1 value=$2 out="$SANDBOX/rt-$RANDOM"
+  ADF_CONFIG=(); ADF_CONFIG[CONSULTANT_DIR]=$value
+  adf_config_write "$out" || { bad "$desc (write failed)"; return; }
+  ADF_CONFIG=(); adf_config_load "$out" 2>/dev/null
+  assert_eq "$desc" "$value" "$(adf_config_get CONSULTANT_DIR)"
+}
+roundtrip 'round-trip: plain path'            '/home/u/consultant'
+roundtrip 'round-trip: spaces'                '/home/u/my consultant dir'
+roundtrip 'round-trip: shell metacharacters'  '/tmp/a$b`c;d&e|f>g'
+roundtrip 'round-trip: double quote in value' '/tmp/say "hi"'
+roundtrip 'round-trip: single quote in value' "/tmp/it's here"
+roundtrip 'round-trip: hash'                  '/tmp/a#b'
+roundtrip 'round-trip: unicode'               '/tmp/café/日本語'
+
+out="$SANDBOX/perm-test/config"
+ADF_CONFIG=(); ADF_CONFIG[CONSULTANT_DIR]='/tmp'
+adf_config_write "$out"
+assert_eq 'written config is mode 0600' '600' "$(stat -c '%a' "$out")"
+assert_eq 'config directory is mode 0700' '700' "$(stat -c '%a' "$(dirname "$out")")"
+
+# ---------------------------------------------------------------------------
+note '5. Command splitting'
+# ---------------------------------------------------------------------------
+declare -a argv
+adf_split_command argv 'codex'
+assert_eq 'single word command'      'codex' "${argv[*]}"
+assert_eq 'single word arity'        '1' "${#argv[@]}"
+adf_split_command argv '  claude   --dangerously-skip-permissions  '
+assert_eq 'extra whitespace collapses' 'claude --dangerously-skip-permissions' "${argv[*]}"
+assert_eq 'argv arity'               '2' "${#argv[@]}"
+adf_split_command argv 'echo *'
+assert_eq 'no globbing during split'  '*' "${argv[1]}"
+adf_split_command argv 'echo $HOME'
+assert_eq 'no expansion during split' '$HOME' "${argv[1]}"
+adf_split_command argv ''
+assert_eq 'empty command yields no argv' '0' "${#argv[@]}"
+
+# ---------------------------------------------------------------------------
+note '6. Directory resolution'
+# ---------------------------------------------------------------------------
+proj="$SANDBOX/proj"; mkdir -p "$proj/sub"
+spaced="$SANDBOX/pro ject dir"; mkdir -p "$spaced"
+dashed="$SANDBOX/-dashy"; mkdir -p "$dashed"
+touch "$SANDBOX/afile"
+
+assert_eq 'absolute path resolves' "$proj" "$(adf_resolve_dir "$proj")"
+assert_eq 'path with spaces resolves' "$spaced" "$(adf_resolve_dir "$spaced")"
+assert_eq 'leading-dash path resolves' "$dashed" "$(adf_resolve_dir "$dashed")"
+assert_eq 'trailing slash normalised' "$proj" "$(adf_resolve_dir "$proj/")"
+assert_eq 'dot-dot normalised' "$proj" "$(adf_resolve_dir "$proj/sub/..")"
+( cd "$proj/sub" && assert_eq 'relative "." resolves' "$proj/sub" "$(adf_resolve_dir .)" )
+( cd "$proj/sub" && assert_eq 'relative ".." resolves' "$proj" "$(adf_resolve_dir ..)" )
+
+adf_resolve_dir "$SANDBOX/nope" >/dev/null 2>&1; assert_rc 'missing dir -> rc 3' 3 $?
+adf_resolve_dir "$SANDBOX/afile" >/dev/null 2>&1; assert_rc 'file, not a dir -> rc 4' 4 $?
+adf_resolve_dir '' >/dev/null 2>&1; assert_rc 'empty path -> rc 2' 2 $?
+
+if [[ $(id -u) -ne 0 ]]; then
+  noread="$SANDBOX/noread"; mkdir -p "$noread"; chmod 000 "$noread"
+  adf_resolve_dir "$noread" >/dev/null 2>&1; assert_rc 'unreadable dir -> rc 5' 5 $?
+  chmod 755 "$noread"
+else
+  printf '  \033[2mskip\033[0m permission test (running as root)\n'
+fi
+
+# CDPATH must not be able to redirect resolution.
+( export CDPATH="$SANDBOX"; cd "$proj" || exit
+  assert_eq 'CDPATH is neutralised' "$proj/sub" "$(adf_resolve_dir sub)" )
+
+# ---------------------------------------------------------------------------
+note '7. Launcher: argument handling'
+# ---------------------------------------------------------------------------
+# Sets the globals `o` (stdout+stderr) and `RC`. Must not be used inside a
+# command substitution or RC would be lost with the subshell.
+run_flow() { o=$("$@" 2>&1); RC=$?; }
+
+run_flow "$FLOW" --help; assert_rc '--help exits 0' 0 $RC
+assert_contains '--help mentions usage' 'Usage:' "$o"
+run_flow "$FLOW" --version; assert_rc '--version exits 0' 0 $RC
+assert_contains '--version prints a version' 'archidev-flow 0.' "$o"
+run_flow "$FLOW" --print-config-path
+assert_eq '--print-config-path matches library' "$(adf_config_file)" "$o"
+run_flow "$FLOW" --bogus; assert_rc 'unknown option -> rc 2' 2 $RC
+assert_contains 'unknown option explains itself' 'unknown option' "$o"
+run_flow "$FLOW" a b; assert_rc 'two project args -> rc 2' 2 $RC
+run_flow "$FLOW" --config; assert_rc '--config without value -> rc 2' 2 $RC
+
+# ---------------------------------------------------------------------------
+note '8. Launcher: --dry-run'
+# ---------------------------------------------------------------------------
+consult="$SANDBOX/consult dir"; mkdir -p "$consult"
+fakebin="$SANDBOX/bin"; mkdir -p "$fakebin"
+for f in codex claude yazi micro; do
+  printf '#!/bin/sh\nexit 0\n' >"$fakebin/$f"; chmod +x "$fakebin/$f"
+done
+export PATH="$fakebin:$PATH"
+
+dcfg="$SANDBOX/dry.config"
+{ printf "CONSULTANT_DIR='%s'\n" "$consult"
+  printf "CONSULTANT_COMMAND='codex --model gpt-5'\n"
+  printf "DEVELOPER_COMMAND='claude'\n"; } >"$dcfg"
+
+run_flow "$FLOW" --dry-run --config "$dcfg" "$proj"
+assert_rc 'dry-run on a valid project exits 0' 0 $RC
+assert_contains 'dry-run shows the project dir' "$proj" "$o"
+assert_contains 'dry-run shows the consultant dir' "$(printf '%q' "$consult")" "$o"
+assert_contains 'dry-run shows consultant argv' 'codex --model gpt-5' "$o"
+assert_contains 'dry-run shows developer argv' 'claude' "$o"
+assert_contains 'dry-run says nothing launched' 'nothing was launched' "$o"
+assert_contains 'dry-run names the wezterm config' 'archidev-flow.lua' "$o"
+
+# --dry-run must not leak unrelated environment or secrets.
+export ARCHIDEV_TEST_SECRET='super-secret-token'
+run_flow "$FLOW" --dry-run --config "$dcfg" "$proj"
+assert_not_contains 'dry-run does not dump the environment' 'super-secret-token' "$o"
+assert_not_contains 'dry-run does not print API keys' 'API_KEY' "$o"
+unset ARCHIDEV_TEST_SECRET
+
+run_flow "$FLOW" --dry-run --config "$dcfg" "$spaced"
+assert_rc 'dry-run: project path with spaces exits 0' 0 $RC
+assert_contains 'dry-run quotes the spaced path' "$(printf '%q' "$spaced")" "$o"
+
+( cd "$proj/sub" && run_flow "$FLOW" --dry-run --config "$dcfg" .
+  assert_rc 'dry-run: relative "." exits 0' 0 "$RC" )
+( cd "$proj/sub" && run_flow "$FLOW" --dry-run --config "$dcfg" ..
+  assert_contains 'dry-run: relative ".." resolves to absolute' "$proj" "$o" )
+
+run_flow "$FLOW" --dry-run --config "$dcfg" "$SANDBOX/no-such-project"
+assert_rc 'dry-run: missing project -> rc 2' 2 $RC
+assert_contains 'dry-run: missing project explained' 'no such file or directory' "$o"
+
+run_flow "$FLOW" --dry-run --config "$dcfg" "$SANDBOX/afile"
+assert_rc 'dry-run: file as project -> rc 2' 2 $RC
+assert_contains 'dry-run: not-a-directory explained' 'not a directory' "$o"
+
+# Unset consultant dir must not silently guess, and must not write a config.
+empty_cfg="$SANDBOX/empty.config"
+: >"$empty_cfg"
+run_flow "$FLOW" --dry-run --config "$empty_cfg" "$proj"
+assert_rc 'dry-run without CONSULTANT_DIR -> rc 3' 3 $RC
+assert_contains 'dry-run explains missing CONSULTANT_DIR' 'CONSULTANT_DIR is not configured' "$o"
+assert_eq 'dry-run did not write the config' '' "$(cat "$empty_cfg")"
+
+run_flow "$FLOW" --dry-run --config "$empty_cfg" --consultant-dir "$consult" "$proj"
+assert_rc '--consultant-dir override works' 0 $RC
+assert_eq '--consultant-dir override is not persisted' '' "$(cat "$empty_cfg")"
+
+run_flow "$FLOW" --dry-run --config "$dcfg" --consultant-dir "$SANDBOX/nope" "$proj"
+assert_rc 'invalid --consultant-dir -> rc 3' 3 $RC
+
+run_flow "$FLOW" --dry-run --config "$dcfg" --no-files-pane "$proj"
+assert_contains '--no-files-pane reflected in dry-run' 'files pane        disabled' "$o"
+
+# Missing AI commands are reported before any launch attempt.
+badcfg="$SANDBOX/bad.config"
+{ printf "CONSULTANT_DIR='%s'\n" "$consult"
+  printf "CONSULTANT_COMMAND='definitely-not-installed-xyz'\n"; } >"$badcfg"
+run_flow "$FLOW" --dry-run --config "$badcfg" "$proj"
+assert_rc 'missing consultant command -> rc 4' 4 $RC
+assert_contains 'missing command is named' 'definitely-not-installed-xyz' "$o"
+
+# Missing optional tools degrade, they do not fail.
+optcfg="$SANDBOX/opt.config"
+{ printf "CONSULTANT_DIR='%s'\n" "$consult"
+  printf "FILE_MANAGER_COMMAND='not-a-file-manager-xyz'\n"
+  printf "EDITOR_COMMAND='not-an-editor-xyz'\n"; } >"$optcfg"
+run_flow "$FLOW" --dry-run --config "$optcfg" "$proj"
+assert_rc 'missing optional tools still exit 0' 0 $RC
+assert_contains 'missing file manager warns' 'plain shell' "$o"
+assert_contains 'missing editor warns about fallback' 'falling back to' "$o"
+
+# ---------------------------------------------------------------------------
+note '9. First-run prompt (piped stdin, non-interactive)'
+# ---------------------------------------------------------------------------
+o=$(printf '\n' | "$FLOW" --config "$SANDBOX/never-created.config" "$proj" 2>&1); RC=$?
+assert_rc 'non-interactive first run refuses to guess -> rc 3' 3 $RC
+assert_contains 'non-interactive first run explains how to set it' '--consultant-dir' "$o"
+[[ -e "$SANDBOX/never-created.config" ]] \
+  && bad 'no config written when the prompt is impossible' \
+  || ok 'no config written when the prompt is impossible'
+
+# ---------------------------------------------------------------------------
+note '9b. First-run prompt on a real terminal (pty)'
+# ---------------------------------------------------------------------------
+# The prompt returns its answer through a command substitution, so its stdout
+# is a pipe even on a terminal; the tty check therefore has to look at stderr.
+# This regression test needs a real pty, which python3 can provide.
+if command -v python3 >/dev/null 2>&1; then
+  pty_home="$SANDBOX/ptyhome"
+  mkdir -p "$pty_home/.config" "$pty_home/proj"
+  # A stub wezterm records how it was invoked instead of opening a window.
+  cat >"$fakebin/wezterm" <<'STUB'
+#!/bin/sh
+if [ "$1" = "start" ] && [ "$2" = "--help" ]; then
+  echo "      --always-new-process"; exit 0
+fi
+{ echo "ARGV: $*"; env | grep '^ARCHIDEV_' | sort; } >"$WEZ_STUB_OUT"
+STUB
+  chmod +x "$fakebin/wezterm"
+
+  pty_out=$(HOME="$pty_home" XDG_CONFIG_HOME="$pty_home/.config" \
+    WEZ_STUB_OUT="$SANDBOX/wez.out" python3 - "$FLOW" "$pty_home/proj" <<'PYEOF' 2>&1
+import os, pty, sys, time
+flow, proj = sys.argv[1], sys.argv[2]
+inputs = [b"\n", b"y\n"]          # accept the suggested dir, agree to create it
+def stdin_read(fd):
+    time.sleep(0.3)
+    return inputs.pop(0) if inputs else b""
+status = pty.spawn([flow, proj], lambda fd: os.read(fd, 4096), stdin_read)
+sys.exit(status >> 8)
+PYEOF
+  ); pty_rc=$?
+
+  assert_rc 'interactive first run succeeds on a tty' 0 "$pty_rc"
+  assert_contains 'first run prompts for the consultant directory' \
+    'Consultant directory' "$pty_out"
+  assert_contains 'first run offers to create a missing directory' \
+    'Create it?' "$pty_out"
+  assert_contains 'first run reports where it saved the setting' \
+    'Saved CONSULTANT_DIR' "$pty_out"
+
+  pty_cfg="$pty_home/.config/archidev-flow/config"
+  if [[ -f $pty_cfg ]]; then
+    ok 'first run wrote the config'
+    assert_eq 'first-run config is mode 0600' '600' "$(stat -c '%a' "$pty_cfg")"
+    ADF_CONFIG=(); adf_config_load "$pty_cfg" 2>/dev/null
+    assert_eq 'first run saved the accepted directory' \
+      "$pty_home/archidev-consultant" "$(adf_config_get CONSULTANT_DIR)"
+    [[ -d "$pty_home/archidev-consultant" ]] \
+      && ok 'first run created the consultant directory' \
+      || bad 'first run created the consultant directory'
+  else
+    bad 'first run wrote the config'
+  fi
+
+  # ...and it went on to launch wezterm with the right config and environment.
+  if [[ -f "$SANDBOX/wez.out" ]]; then
+    w=$(cat "$SANDBOX/wez.out")
+    ok 'launcher execs wezterm'
+    assert_contains 'wezterm gets our project-owned config file' \
+      '--config-file' "$w"
+    assert_contains 'wezterm gets archidev-flow.lua' 'archidev-flow.lua' "$w"
+    assert_contains 'wezterm is asked for a fresh process' '--always-new-process' "$w"
+    assert_contains 'project dir passed to wezterm' \
+      "ARCHIDEV_PROJECT_DIR=$pty_home/proj" "$w"
+    assert_contains 'consultant dir passed to wezterm' \
+      "ARCHIDEV_CONSULTANT_DIR=$pty_home/archidev-consultant" "$w"
+    assert_contains 'consultant argv passed to wezterm' 'ARCHIDEV_CONSULTANT_ARGV=codex' "$w"
+    assert_contains 'developer argv passed to wezterm' 'ARCHIDEV_DEVELOPER_ARGV=claude' "$w"
+    assert_contains 'pane runner passed to wezterm' 'ARCHIDEV_PANE_RUNNER=' "$w"
+    assert_contains 'workspace name is per-launch' 'ARCHIDEV_WORKSPACE=archidev-proj-' "$w"
+  else
+    bad 'launcher execs wezterm'
+  fi
+  rm -f "$fakebin/wezterm" "$SANDBOX/wez.out"
+else
+  printf '  \033[2mskip\033[0m python3 not available for the pty test\n'
+fi
+
+# ---------------------------------------------------------------------------
+note '10. Real user config untouched'
+# ---------------------------------------------------------------------------
+[[ ! -e "$XDG_CONFIG_HOME/archidev-flow/config" ]] \
+  && ok 'no config created in the sandboxed XDG dir by dry runs' \
+  || bad 'a dry run created a config file'
+
+# ---------------------------------------------------------------------------
+note '11. Dependency check'
+# ---------------------------------------------------------------------------
+o=$("$ROOT/scripts/check-dependencies" "$dcfg" 2>&1); RC=$?
+assert_contains 'dep check lists wezterm' 'wezterm' "$o"
+assert_contains 'dep check separates required' 'Required' "$o"
+assert_contains 'dep check separates optional' 'Optional' "$o"
+if command -v wezterm >/dev/null 2>&1; then
+  assert_rc 'dep check passes (wezterm installed)' 0 $RC
+else
+  assert_rc 'dep check fails when wezterm is missing' 1 $RC
+  assert_contains 'dep check gives an install hint' 'wezterm.org/install' "$o"
+fi
+assert_not_contains 'dep check never installs anything' 'Installing' "$o"
+
+o=$("$ROOT/scripts/check-dependencies" "$badcfg" 2>&1); RC=$?
+assert_rc 'dep check fails on a missing consultant command' 1 $RC
+assert_contains 'dep check names the configured command' 'definitely-not-installed-xyz' "$o"
+
+o=$("$FLOW" --check-deps 2>&1); RC=$?
+assert_contains '--check-deps runs the dependency script' 'dependency check' "$o"
+
+# ---------------------------------------------------------------------------
+note '12. Pane runner'
+# ---------------------------------------------------------------------------
+PANE="$ROOT/lib/archidev-pane"
+o=$(SHELL=/bin/true ARCHIDEV_SESSION_ID=test "$PANE" consultant echo hello 2>&1)
+assert_contains 'pane runner runs its command' 'hello' "$o"
+assert_contains 'pane runner tags the pane role (OSC 1337 user var)' 'SetUserVar=ARCHIDEV_ROLE=' "$o"
+assert_contains 'pane runner base64-encodes the role' "$(printf 'consultant' | base64)" "$o"
+assert_contains 'pane runner sets a window title' 'ArchiDev Consultant' "$o"
+assert_contains 'pane runner survives command exit' 'exited with status 0' "$o"
+
+o=$(SHELL=/bin/true "$PANE" developer definitely-not-a-command-xyz 2>&1)
+assert_contains 'pane runner reports a missing command' 'command not found' "$o"
+assert_contains 'pane runner keeps the pane after a missing command' 'exited with status 127' "$o"
+
+o=$(SHELL=/bin/true "$PANE" consultant sh -c 'exit 3' 2>&1)
+assert_contains 'pane runner reports a non-zero exit' 'exited with status 3' "$o"
+
+o=$(SHELL=/bin/true ARCHIDEV_EDITOR_COMMAND=micro "$PANE" files sh -c 'echo EDITOR=$EDITOR VISUAL=$VISUAL' 2>&1)
+assert_contains 'files pane exports EDITOR' 'EDITOR=micro' "$o"
+assert_contains 'files pane exports VISUAL' 'VISUAL=micro' "$o"
+o=$(SHELL=/bin/true ARCHIDEV_EDITOR_COMMAND= "$PANE" files sh -c 'echo EDITOR=$EDITOR' 2>&1)
+assert_contains 'files pane falls back to an installed editor' 'EDITOR=' "$o"
+o=$(SHELL=/bin/true "$PANE" consultant sh -c 'echo EDITOR=[$EDITOR]' 2>&1)
+assert_contains 'non-files panes do not get EDITOR forced' 'EDITOR=[]' "$o"
+
+# ---------------------------------------------------------------------------
+note '13. WezTerm Lua config'
+# ---------------------------------------------------------------------------
+LUA="$ROOT/wezterm/archidev-flow.lua"
+[[ -r $LUA ]] && ok 'lua config exists' || bad 'lua config exists'
+
+lua_checked=0
+if command -v wezterm >/dev/null 2>&1; then
+  if o=$(wezterm --config-file "$LUA" show-keys 2>&1 >/dev/null); then
+    ok 'wezterm accepts the config (show-keys)'
+  else
+    bad "wezterm rejected the config: $o"
+  fi
+  lua_checked=1
+fi
+for luabin in luac5.4 luac5.3 luac luajit lua5.4 lua5.3 lua; do
+  if command -v "$luabin" >/dev/null 2>&1; then
+    case $luabin in
+      luac*) o=$("$luabin" -p "$LUA" 2>&1) ;;
+      *)     o=$("$luabin" -e "assert(loadfile('$LUA'))" 2>&1) ;;
+    esac
+    if [[ -z $o ]]; then ok "lua syntax ($luabin)"; else bad "lua syntax ($luabin): $o"; fi
+    lua_checked=1
+    break
+  fi
+done
+# Optional node-based checkers. The repository has no dependencies of its own;
+# point ADF_NODE_MODULES at a scratch dir where you ran
+#   npm install luaparse fengari
+if [[ -n ${ADF_NODE_MODULES:-} ]] && command -v node >/dev/null 2>&1; then
+  export NODE_PATH="$ADF_NODE_MODULES/node_modules"
+  if [[ -d $NODE_PATH/luaparse ]]; then
+    o=$(node -e '
+      const fs=require("fs"), luaparse=require("luaparse");
+      try { luaparse.parse(fs.readFileSync(process.argv[1],"utf8"),{luaVersion:"5.3"}); }
+      catch(e){ console.error(e.message); process.exit(1); }' "$LUA" 2>&1)
+    if [[ -z $o ]]; then ok 'lua syntax (luaparse)'; else bad "lua syntax (luaparse): $o"; fi
+    lua_checked=1
+  fi
+  # Execute the pure Lua helpers (argv splitting, trailing-newline stripping)
+  # in a real Lua VM, so their behaviour - not just their syntax - is tested.
+  if [[ -d $NODE_PATH/fengari ]]; then
+    if o=$(node "$ROOT/tests/lua-behaviour.js" "$LUA" 2>&1); then
+      while IFS= read -r line; do
+        [[ $line == *'  ok   '* ]] && ok "lua behaviour: ${line#*ok   }"
+      done <<<"$o"
+    else
+      bad "lua behaviour: $o"
+    fi
+    lua_checked=1
+  fi
+fi
+(( lua_checked )) || printf '  \033[2mskip\033[0m no Lua checker available (install wezterm or lua, or set ADF_NODE_MODULES)\n'
+
+# Cheap invariants that do not need a Lua runtime.
+grep -q 'send_paste' "$LUA" && ok 'lua uses paste semantics (send_paste)' || bad 'lua uses paste semantics'
+grep -q "strip_trailing_newlines" "$LUA" && ok 'lua strips trailing newlines before transfer' || bad 'lua strips trailing newlines'
+if grep -nE "send_text\s*\(\s*['\"].*\\\\[rn]" "$LUA" >/dev/null; then
+  bad 'lua never sends a bare newline/Enter'
+else
+  ok 'lua never sends a bare newline/Enter'
+fi
+grep -q "gui-startup" "$LUA" && ok 'lua builds the layout in gui-startup (no timing hacks)' || bad 'lua uses gui-startup'
+if grep -nE '\bos\.execute\b|\bio\.popen\b' "$LUA" >/dev/null; then
+  bad 'lua does not shell out'
+else
+  ok 'lua does not shell out'
+fi
+
+# ---------------------------------------------------------------------------
+note '14. Repository hygiene'
+# ---------------------------------------------------------------------------
+for f in README.md bin/archidev-flow lib/archidev-lib.sh lib/archidev-pane \
+         wezterm/archidev-flow.lua scripts/check-dependencies \
+         examples/config.example tests/run-tests; do
+  [[ -e "$ROOT/$f" ]] && ok "present: $f" || bad "missing: $f"
+done
+if grep -rn "/home/$(id -un)" "$ROOT" --include='*' \
+     --exclude-dir=.git 2>/dev/null | grep -v '^Binary' >/dev/null; then
+  bad 'no hardcoded home directory'
+  grep -rn "/home/$(id -un)" "$ROOT" --exclude-dir=.git | head -5
+else
+  ok 'no hardcoded home directory'
+fi
+
+# ---------------------------------------------------------------------------
+printf '\n\033[1mResult:\033[0m %d passed, %d failed\n' "$pass" "$fail"
+(( fail == 0 )) || exit 1
