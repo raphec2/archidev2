@@ -438,3 +438,15 @@ apart from the `/usr/bin/env bash` pane runner, so a port would be a PowerShell 
 launches native `codex.exe`/`claude.exe` with a `.ps1` pane runner or runs the existing Bash
 runner through `wsl.exe` with paths translated by `wslpath`. The routing logic, pane identity
 scheme, menus and key bindings would carry over unchanged.
+
+---
+
+## Licence
+
+ArchiDev2 is free software licensed under the **GNU General Public License, version 2 or later
+(`GPL-2.0-or-later`)**. The complete GPL v2 text is in [`LICENSE`](LICENSE), and every original
+source file carries an `SPDX-License-Identifier: GPL-2.0-or-later` header.
+
+The native Qt workspace in [`spikes/qt/`](spikes/qt/) links QTermWidget (GPL) and Qt
+(LGPLv3 / GPL / commercial), so distributed builds of it must comply with GPL terms. No
+third-party source is vendored; both libraries are used as installed system packages.

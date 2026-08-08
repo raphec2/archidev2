@@ -1,183 +1,313 @@
-# ArchiDev2 — Qt/QTermWidget spike
+# ArchiDev2 — Qt native workspace
 
-A live-first experiment, not the product. It exists to answer one question before any real
-application is built:
+A personal, Linux-first, **CLI-launched** workspace for working with terminal AIs.
 
-> Can ArchiDev2 read a selection from a terminal or an editor, insert it into another surface
-> **without it being submitted**, and move focus — with persistent clickable buttons?
+> Select text in any surface → click a destination → it is inserted without being submitted →
+> focus follows it.
 
-Routing, the stock Qt file tree and single-document editing are proven. This iteration adds
-generic AI command profiles, per-role dropdowns with explicit restart, and a remembered
-consultant directory. Still deliberately absent: a settings screen, packaging and tests.
+Three terminals (Consultant AI, Developer AI, Project Shell), two file explorers, one shared
+Notes/Editor, and **source-local routing controls**. Not an IDE, not a launcher app, not a
+settings application.
+
+```
+┌──────────────────────────────────────────┬────────────────────────────────────┐
+│ Consultant AI: [profile ▾][Restart][Hide]│ Developer AI: [profile ▾][Restart] │
+│ [→ Developer] [→ Notes] [→ Shell]        │ [→ Consultant] [→ Notes] [→ Shell] │
+│ ┌───────────────┬──────────────────────┐ │                                    │
+│ │ CONSULTANT    │ CONSULTANT terminal  │ │ DEVELOPER terminal                 │
+│ │ FILES         │                      │ │                                    │
+│ └───────────────┴──────────────────────┘ │                                    │
+├──────────────────┬───────────────────────┴────────────┬───────────────────────┤
+│ PROJECT FILES    │ NOTES / EDITOR                     │ PROJECT SHELL         │
+│ ↑ Parent ⌂ Start │ [Open Notes] [Save]                │ [Restart Shell]       │
+│ [Sort ▾] /path   │ [→ Consultant] [→ Developer]       │ [→ Consultant]        │
+│ [Open in Notes]  │ [→ Shell]                          │ [→ Developer] [→ Notes]│
+└──────────────────┴────────────────────────────────────┴───────────────────────┘
+│ status                                                                         │
+```
 
 ## Build and run
 
-Requires (all from Ubuntu packages, nothing vendored):
-`cmake`, `g++`, `qtbase5-dev`, `libqtermwidget5-1-dev`.
+Requires Ubuntu packages only — nothing vendored: `cmake`, `g++`, `qtbase5-dev`,
+`libqtermwidget5-1-dev`.
 
 ```sh
 cmake -S spikes/qt -B build/qt-spike
 cmake --build build/qt-spike --parallel
 
-./build/qt-spike/archidev2-qt <project-dir> <consultant-dir> <consultant-prog> <developer-prog>
+./build/qt-spike/archidev2-qt /path/to/project              # normal launch
+./build/qt-spike/archidev2-qt .                             # current directory
 ```
 
-Both programs are resolved through `PATH` and started directly — **never through a shell
-string**. It works with `/bin/bash` for both, which is how the routing was proven.
+Options (`--help` for the full list):
 
-```sh
-./build/qt-spike/archidev2-qt /tmp/archidev2-test /tmp/archidev2-consultant codex claude
 ```
+--consultant-dir <path>        consultant working directory (written to the INI on first run)
+--consultant-profile <name>    this launch only
+--developer-profile <name>     this launch only
+--shell <program>              project shell program (default: $SHELL)
+```
+
+CLI role/profile values apply to the current launch only. Choosing a profile in the UI and
+restarting *is* saved, because that is a deliberate workspace choice.
 
 ### One packaging workaround
 
-Ubuntu's `qtermwidget5` metadata is broken twice over: its `.pc` file requires a
-`libutf8proc.pc` the distro does not ship, and its CMake target propagates the *dev* symlink
-`/usr/lib/.../libutf8proc.so`, which lives only in `libutf8proc-dev`. `libqtermwidget5.so`
-already links `libutf8proc.so.3` itself, so nothing here needs it. `CMakeLists.txt` therefore
-drops propagated absolute link paths that do not exist. The alternative, if you prefer, is
+Ubuntu's `qtermwidget5` metadata is broken twice: its `.pc` requires a `libutf8proc.pc` the
+distro does not ship, and its CMake target propagates the dev-only symlink
+`/usr/lib/.../libutf8proc.so`. `libqtermwidget5.so` already links `libutf8proc.so.3` itself, so
+`CMakeLists.txt` drops propagated absolute link paths that do not exist. Alternative:
 `sudo apt install libutf8proc-dev`.
 
-### Spike-only self-check
+## Configuration is project-local, always
 
-`ARCHIDEV2_SPIKE_SELFTEST=<file>` makes the app, 2 s after startup, route editor text to the
-Developer terminal, then open `<file>`, append a line and save it — all through the real code
-paths. It exists so "inserted but not submitted", opening and atomic saving can be proven
-without a human drag. Remove it in the product.
+Everything lives in **`<project>/.archidev2.ini`**. ArchiDev2 reads and writes **no** central or
+user-wide configuration: no `~/.config/ArchiDev2`, no `~/.config/archidev2`, no central profile
+JSON, no workspace registry, no recent-projects list. The only `QSettings` object in the codebase
+is constructed against that explicit path.
 
-## What it does
+> Earlier iterations used `~/.config/ArchiDev2/ArchiDev2.conf` and
+> `~/.config/archidev2/ai-profiles.json`. Those are now **unused**. Nothing migrates them
+> automatically and nothing deletes them — remove them by hand if you want to.
 
-Two `QTermWidget`s (Consultant, Developer), a `QTreeView` file explorer, one `QPlainTextEdit`,
-three persistent destination buttons, a Save button (`Ctrl+S`) and a status line, in nested
-`QSplitter`s. The focused surface's header is highlighted.
+On first run the file is created with explanatory comments:
 
-**Selection source**, resolved fresh on every click: the focused surface if it has a live
-selection, otherwise the most recently selected surface if its selection is still live,
-otherwise any surface with one. The text is re-read at send time, so a selection that has since
-disappeared is never routed as stale text — it reports `Nothing selected` instead. Sending to
-the surface the text came from is refused.
+```ini
+# ArchiDev2 project-local configuration.
+# This is the ONLY place ArchiDev2 stores settings - nothing is written
+# to your home directory. It may contain machine-specific absolute paths,
+# so add .archidev2.ini to .gitignore if it should stay local.
 
-**Buttons use `Qt::NoFocus`**, so clicking one cannot move focus off the source terminal. This
-is reinforced by QTermWidget itself: its `focusOutEvent()` does not clear the selection — every
-`clearSelection()` call in `TerminalDisplay.cpp` is in a mouse handler.
+[workspace]
+consultant_directory=/path/to/consulting
+# notes_file: a plain text file opened by the "Open Notes" button.
+# Relative paths resolve against consultant_directory.
+notes_file=
 
-## Terminal insertion safety
+[roles]
+consultant_profile=Codex
+developer_profile=Claude
 
-The decisive criterion. Text going into a terminal is:
+[profiles/Codex]
+program=codex
+arguments=
 
-1. stripped of trailing `\r`/`\n` — interior newlines are preserved;
-2. passed through `QTermWidget::bracketText()`, which wraps it in `\e[200~ … \e[201~` **only
-   when the running program has enabled bracketed paste**;
-3. sent with `QTermWidget::sendText()` — exactly those bytes.
+[profiles/Claude]
+program=claude
+arguments=
 
-No Enter, Return or newline is ever appended, and the desktop clipboard is not involved.
+[shell]
+# Blank uses $SHELL, falling back to /bin/bash.
+program=
+arguments=-l
 
-Verified against `/bin/bash`: routing `touch /tmp/ad2-selftest-EXECUTED\nsecond line\n` reported
-44 characters (45 minus one stripped trailing newline) and **the file was not created** — the
-text reached the prompt without being executed. The 12 extra bytes observed before the counter
-was corrected were the two bracketed-paste markers, which confirms bash had the mode enabled and
-the wrapping was applied.
+[explorers]
+consultant_visible=true
+consultant_current=
+consultant_sort=name_asc
+consultant_allow_above_start=true
+project_visible=true
+project_current=
+project_sort=name_asc
+project_allow_above_start=false
 
-## File tree and editor
+[layout]
+top_consultant=55
+top_developer=45
+consultant_files=32
+consultant_term=68
+bottom_project_files=22
+bottom_notes=48
+bottom_shell=30
+```
 
-`QFileSystemModel` + `QTreeView`, rooted at the project directory, name column only. Nothing is
-custom: the model populates lazily on its own thread and keeps itself current through
-`QFileSystemWatcher`, so there is no recursive crawler and large directories cost nothing up
-front. Double-click a file to open it; double-clicking a directory just expands it.
+**Writes preserve your comments.** `QSettings::sync()` would rewrite the whole file in its own
+representation — discarding every comment and turning `[profiles/Codex]` into `[profiles]` with
+`Codex\program=`. Since this file is the only settings surface and is meant to be hand-edited,
+ArchiDev2 reads through QSettings but writes by editing the INI text in place, so the sections
+above are exactly what you keep seeing.
 
-The editor holds **one document at a time**. There is no Save As, no tabs, no syntax
-highlighting.
+### First run
 
-### Exact dirty-document decisions
+```
+archidev2 /path/to/project
+```
 
-The document is dirty whenever `QTextDocument::isModified()` is true — typing *and* routing text
-in both count. Dirty state shows as ` *` in the EDITOR header and the window title.
+If `.archidev2.ini` is absent, ArchiDev2 creates it, then resolves the consultant directory from
+`--consultant-dir`, or by prompting on the terminal when stdin is a TTY. There is **no desktop
+directory chooser** — this is a CLI product. Non-interactive with no consultant directory, it
+writes the template, prints the exact command to run, and exits 3:
 
-| Situation | Behaviour |
-|---|---|
-| Open a file, document clean | Opens immediately |
-| Open a file, document dirty | Modal **Save / Discard / Cancel**. Cancel aborts the open. Save aborts the open if the save fails. |
-| Close the window, document clean | Closes |
-| Close the window, document dirty | Same three-way prompt; Cancel vetoes the close, and a failed save also vetoes it |
-| Save with no file open | Refused: *"No file open - nothing to save"*. A routed scratch buffer cannot be saved in this spike. |
-| Save when not dirty | No write at all; reports *"No changes to save"* |
-| File changed on disk since it was opened or last saved | Modal **Overwrite / Cancel**, compared on mtime *and* size. Cancel leaves the file alone and the document dirty. |
+```
+archidev2 --consultant-dir /path/to/consulting /path/to/project
+```
 
-### Exact failure behaviour
+If the project directory is not writable it fails clearly and never falls back to central
+storage.
 
-Every failure leaves the current document and the file on disk untouched, reports the reason in
-the status line, and keeps the document dirty if it was.
+## AI profiles
 
-| Failure | Behaviour |
-|---|---|
-| File is not valid UTF-8, or contains a NUL byte | Refused; the currently open document stays open |
-| File larger than 8 MB | Refused, with the size and the limit named |
-| File unreadable, or cannot be opened | Refused, with Qt's error string |
-| Save fails (permissions, full disk, …) | `QSaveFile` discards its temp file, **the original is never truncated**, the document stays dirty, and the status reads `SAVE FAILED: … (file left unchanged, still unsaved)` |
-| Directory double-clicked | Ignored; the tree expands it |
+An AI is only a display name, a program and an argument list. No provider adapters, no SDKs, no
+model-specific behaviour. Add any interactive CLI:
 
-Saving is atomic: `QSaveFile` writes a temporary file alongside the target and renames it into
-place only on `commit()`. A file's trailing-newline convention is preserved — `QPlainTextEdit`
-has no notion of one, so editing the last line of a file that ended with `\n` would otherwise
-silently strip it and produce a spurious diff. Files that arrived without a trailing newline do
-not gain one.
+```ini
+[profiles/Gemini]
+program=gemini
+arguments=
 
-## Verified live
+[profiles/LocalQwen]
+program=ollama
+arguments=run, qwen3
+```
 
-Confirmed by hand against Codex and Claude: both render and accept input inside QTermWidget, a
-normal mouse drag selects, `selectedText()` returns it, clicking a destination button preserves
-and routes the selection, multiline text arrives unsubmitted, and focus moves.
+Gemini and Ollama are **examples only** — nothing here checks that they are installed or behave
+well in a terminal.
+
+`arguments` is a comma-separated list; QSettings returns a single value as a string and several
+as a list, and both are accepted. Names must be unique and `program` non-empty; each rejected
+entry is reported individually in the status line and never hides the valid ones. Built-in
+`Codex` and `Claude` are appended only for names the INI does not define. Bare programs resolve
+through `PATH`; absolute paths are used as given. No shell is ever involved.
+
+## Roles, shell and restart
+
+```
+Consultant AI: [profile ▾] [Restart] (Restart to apply)   Developer AI: [profile ▾] [Restart]   [Restart Shell]
+```
+
+Changing a dropdown never touches the running session — it only shows `Restart to apply`.
+Restart always confirms first, validates the executable *before* disturbing anything, hangs up
+only that role's own child PID, replaces the `QTermWidget` in its own frame, and reconnects the
+focus and selection signals. The other two terminals are untouched.
+
+The **Project Shell** is your normal `$SHELL` (`-l` by default) in the project directory, for
+builds, tests, Git and package installs. It has no AI profile, has its own Restart, and is
+unaffected by AI restarts. It is a full routing source *and* destination.
+
+## Routing is source-local
+
+**Every group of routing buttons belongs to one source surface and reads only that surface's
+selection.** There is no global "last selected surface" — that model is gone, not merely
+disabled. Consultant's buttons always send Consultant's text even if Notes, Developer and Shell
+all hold selections at the same time.
+
+Each source gets buttons for the other three surfaces only, so nothing can target itself:
+
+| Source | Buttons | Reads |
+|---|---|---|
+| Consultant | → Developer, → Notes, → Shell | `consultantTerminal->selectedText(true)` |
+| Developer | → Consultant, → Notes, → Shell | `developerTerminal->selectedText(true)` |
+| Notes | → Consultant, → Developer, → Shell | `editor->textCursor().selectedText()` |
+| Project Shell | → Consultant, → Developer, → Notes | `shellTerminal->selectedText(true)` |
+
+The selection is read live at click time, never cached and never borrowed. A source with nothing
+selected reports `Nothing selected in CONSULTANT` (or DEVELOPER / NOTES / PROJECT SHELL) rather
+than falling back. Each group's buttons enable and disable from their own source's selection
+signal. Buttons use `Qt::NoFocus`, so clicking one cannot disturb the selection it is about to
+read.
+
+For terminal destinations the text has trailing CR/LF stripped (interior newlines preserved),
+goes through `QTermWidget::bracketText()` — which wraps in `\e[200~…\e[201~` only when the
+running program enabled bracketed paste — and is delivered with `sendText()`. **No Enter is ever
+appended**, and the desktop clipboard is never used for internal routing.
+
+## Explorers
+
+Both are stock `QFileSystemModel` + `QTreeView` — lazy, threaded, self-updating, no custom model
+or crawler. The only custom model code is a small `ExplorerSortProxy` that keeps folders first.
+
+**Consultant Files** is attached inside the Consultant area, left of its terminal, and can be
+hidden with **Hide Files**. **Project Files** sits at the bottom left. Each has its own toolbar:
+
+```
+[↑ Parent] [⌂ Start] [Sort ▾]  /current/path   [Send File → Consultant] [Open in Notes]
+```
+
+*Start* is where the explorer opens and where ⌂ returns to; *Current* is where it is looking now.
+**Parent** walks up from Current. With `allow_above_start=false` (the Project default) it stops
+at Start, comparing canonical paths so a symlink cannot step outside; with `true` (the Consultant
+default) it can walk to `/`. Either way **explorer navigation never changes a terminal's working
+directory** — it only changes the view.
+
+Six sort modes — name A→Z / Z→A, modified newest / oldest, size largest / smallest — with folders
+always first and name as the tiebreaker. Each explorer sorts independently, keeps its mode while
+navigating, and falls back to `name_asc` on an unrecognised value.
+
+**Send File → Consultant** (Consultant Files only) inserts the selected text file straight into
+the Consultant prompt using the same bracketed-paste path, never submitted. It refuses
+directories, non-UTF-8/NUL files and anything over 256 KB, and asks for confirmation above 16 KB.
+Double-clicking a file opens it in Notes; sending to Consultant stays an explicit button.
+
+## Notes / Editor
+
+One shared document, opened from either explorer or from **Open Notes**: explicit **Save** /
+`Ctrl+S`, dirty marker in the header and title, atomic writes via `QSaveFile`, an overwrite prompt if the file changed on disk, and
+refusal of non-UTF-8, NUL-containing, oversized (>8 MB) or unreadable files with the current
+document left open. A file's trailing-newline convention is preserved.
+
+**Open Notes** opens `notes_file` in that same editor — relative paths resolve against the
+consultant directory. If it is missing you are offered to create it; if unset, the status line
+says to set `notes_file` in the INI. There is no separate notes editor. Routing text into Notes
+marks the document dirty like any other edit.
+
+## Project Shell
+
+Bottom right: your `$SHELL` (`-l` by default) in the project directory, for builds, tests, Git
+and package installs. No AI profile, its own **Restart Shell**, unaffected by AI restarts, and a
+full routing source and destination.
+
+## Dark theme
+
+One built-in dark theme, no chooser: black surfaces, blue outlines, white text. Applied as a
+dark `QPalette` plus a focused stylesheet covering panes, headers, trees, editor, dropdowns,
+buttons, status line, splitter handles, scrollbars, menus and dialogs. Disabled controls stay
+legible. The focused surface gets a bright blue border and a highlighted header; the others are
+muted. Terminals use the installed **`WhiteOnBlack`** scheme (verified in
+`/usr/share/qtermwidget5/color-schemes`: background `0,0,0`, foreground `255,255,255`).
+
+## Layout persistence
+
+Splitter proportions, explorer visibility, each explorer's current directory and each explorer's
+sort mode are stored in `[layout]` and `[explorers]`, written **once on close** rather than
+continuously while navigating or dragging. A saved current directory that no longer exists or
+falls outside a bounded root silently reverts to Start. Impossible
+values are ignored in favour of the compiled defaults. Editor contents are never persisted.
+
+## Verified automatically
+
+Clean build, zero warnings. Sandboxed, disposable projects, harmless `/bin/bash` profiles:
+INI template creation, first-run non-interactive exit, `--consultant-dir`, custom and malformed
+profiles, multi-argument profiles, three distinct terminals with correct cwds, per-role restart
+isolation (each changes only its own PID, routing still reaches it, no orphans), routing from
+the editor to all three terminals without execution, notes via a relative path, atomic save,
+trailing-newline preservation, and a comment-preserving INI round-trip.
+
+## Needs your eyes
+
+The three-terminal layout and proportions; the dark theme and whether the active-surface border
+reads clearly; Consultant vs Project explorer widths; collapse/restore; the notes flow including
+the creation prompt; restarting into **real** Codex/Claude sessions from the dropdowns; routing
+between all four surfaces by hand; multiline safety in a live AI prompt; and modal dialog
+readability.
 
 ## Known limitations
 
-- **`$` in a profile field cannot be passed literally.** QTermWidget's
+- **A literal `$` cannot be passed in a profile field.** QTermWidget's
   `Session::setProgram/setArguments/setInitialWorkingDirectory` all run `ShellCommand::expand()`,
-  which substitutes `$VAR`. Its `\$` escape skips the expansion but leaves the backslash behind,
-  so there is no way through the public API to deliver a literal `$`. ArchiDev2 warns when a
-  profile contains one instead of letting it surprise you. Spaces and `; | & *` are unaffected
-  and pass through byte-for-byte.
-- No Save As, no tabs, no syntax highlighting, no settings screen.
-- The Developer directory is fixed to the launch argument; only the Consultant directory can be
-  changed at runtime.
-
-## Still unproven — needs your eyes
-
-This iteration's additions have only been exercised head­lessly, through the real code paths but
-without a human at the window:
-
-- the file tree rendering, expanding, and double-click opening a file;
-- the three modal prompts — unsaved-changes on open, unsaved-changes on close, and
-  changed-on-disk before overwrite. The close guard in particular cannot be reached by the
-  automated runs, because `SIGTERM` bypasses Qt's `closeEvent` entirely.
-- `Ctrl+S` reaching the Save button.
-
-## Later, not now
-
-The product will select AI commands from generic profiles — no provider adapters, no SDKs, just
-programs and arguments:
-
-```json
-{ "profiles": [
-    { "name": "Codex",      "program": "codex",  "arguments": [] },
-    { "name": "Local Qwen", "program": "ollama", "arguments": ["run", "qwen3"] } ] }
-```
-
-Next, once this iteration has been used in anger: AI command profiles, then whatever daily use
-actually demands.
+  and its `\$` escape leaves the backslash behind. ArchiDev2 warns rather than surprising you.
+- No Save As, no tabs, no syntax highlighting, no settings screen, no third explorer.
+- The Developer and Shell directories are the launched project; only the consultant directory is
+  configurable.
+- Notes creation and restart confirmations are modal, so scripted runs block on them.
 
 ## Attribution and licensing
 
 Not legal advice.
 
-- **ArchiDev2's own code: `GPL-2.0-or-later`.** Full text in the top-level `LICENSE`; source
-  files carry `// SPDX-License-Identifier: GPL-2.0-or-later`.
-- **[QTermWidget](https://github.com/lxqt/qtermwidget)** by the LXQt project, derived from KDE's
-  Konsole — **GPL**. Its core files (`TerminalDisplay`, `Emulation`, `Session`, `Screen`,
-  `Vt102Emulation`) carry GNU General Public License headers.
-- **[Qt 5](https://www.qt.io/)** by The Qt Company — available under LGPLv3, GPL, or a
-  commercial licence.
+- **ArchiDev2's own code: `GPL-2.0-or-later`** — full text in the top-level `LICENSE`; sources
+  carry `// SPDX-License-Identifier: GPL-2.0-or-later`.
+- **[QTermWidget](https://github.com/lxqt/qtermwidget)** (LXQt, derived from KDE Konsole) — GPL.
+- **[Qt 5](https://www.qt.io/)** — LGPLv3 / GPL / commercial.
 
-Because ArchiDev2 links QTermWidget, **any distributed build must comply with GPL terms**. That
-is compatible with ArchiDev2 being a GPL project, but it does rule out a future proprietary
-release without replacing the terminal widget. No third-party source is vendored here; both
-libraries are used as installed system packages.
+Linking QTermWidget means distributed builds must comply with GPL terms. No third-party source
+is vendored; both libraries are used as installed system packages.

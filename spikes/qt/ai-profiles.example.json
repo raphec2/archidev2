@@ -1,8 +1,0 @@
-{
-  "profiles": [
-    { "name": "Codex",      "program": "codex",  "arguments": [] },
-    { "name": "Claude",     "program": "claude", "arguments": [] },
-    { "name": "Gemini",     "program": "gemini", "arguments": [] },
-    { "name": "Local Qwen", "program": "ollama", "arguments": ["run", "qwen3"] }
-  ]
-}
