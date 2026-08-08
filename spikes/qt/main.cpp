@@ -5,6 +5,10 @@
 // Selected text routes between all three surfaces and is never submitted.
 #include <QApplication>
 #include <QCloseEvent>
+#include <QComboBox>
+#include <QCommandLineParser>
+#include <QFileDialog>
+#include <QSettings>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -25,7 +29,10 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <functional>
+#include <signal.h>
 #include <qtermwidget.h>
+
+#include "profiles.h"
 
 enum Surface { SConsultant, SDeveloper, SEditor, SNone };
 static const char *kName[] = {"CONSULTANT", "DEVELOPER", "EDITOR"};
@@ -51,17 +58,39 @@ static bool resolveDir(const QString &raw, QString *out, QString *err) {
     return true;
 }
 
-static QTermWidget *makeTerm(const QString &program, const QString &cwd) {
+static QTermWidget *makeTerm(const AiProfile &p, const QString &cwd) {
     auto *t = new QTermWidget(0);        // 0 = do not auto-start a shell
-    t->setShellProgram(program);         // resolved via PATH by the widget itself
-    t->setArgs({});
+    t->setShellProgram(p.resolvedProgram());   // absolute path; no shell is involved
+    t->setArgs(p.arguments);                   // preserved exactly, never re-parsed
     t->setWorkingDirectory(cwd);
     t->setTerminalSizeHint(false);
     t->startShellProgram();
     return t;
 }
 
-static QWidget *labelled(const QString &title, const QString &sub, QWidget *inner, QLabel **hdrOut) {
+// Retire a terminal we own: hang up its own child PID, then delete the widget.
+// Only ever this one PID - no process-name matching, no pkill, no shell.
+static void retireTerm(QTermWidget *t) {
+    if (!t) return;
+    const int pid = t->getShellPID();
+    if (pid > 0) ::kill(static_cast<pid_t>(pid), SIGHUP);
+    t->setParent(nullptr);
+    t->deleteLater();
+}
+
+// Everything one AI role owns.
+struct Role {
+    QTermWidget *term = nullptr;
+    QVBoxLayout *slot = nullptr;     // frame layout the terminal sits in
+    QComboBox *combo = nullptr;
+    QLabel *header = nullptr;
+    QLabel *pending = nullptr;       // "Restart to apply"
+    QString runningProfile;          // profile name of the live session
+    QString cwd;
+};
+
+static QWidget *labelled(const QString &title, const QString &sub, QWidget *inner, QLabel **hdrOut,
+                         QVBoxLayout **slotOut = nullptr) {
     auto *box = new QWidget;
     auto *v = new QVBoxLayout(box);
     v->setContentsMargins(0, 0, 0, 0);
@@ -73,29 +102,71 @@ static QWidget *labelled(const QString &title, const QString &sub, QWidget *inne
     frame->setFrameShape(QFrame::StyledPanel);
     auto *fv = new QVBoxLayout(frame);
     fv->setContentsMargins(1, 1, 1, 1);
-    fv->addWidget(inner);
+    if (inner) fv->addWidget(inner);   // terminal slots start empty and are filled by launchRole
     v->addWidget(frame, 1);
     *hdrOut = hdr;
+    if (slotOut) *slotOut = fv;      // where the terminal lives, for restart
     return box;
 }
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     QTextStream err(stderr);
-    const QStringList a = QApplication::arguments();
-    if (a.size() != 5) {
-        err << "usage: archidev2-qt <project-dir> <consultant-dir> <consultant-prog> <developer-prog>\n";
+    QCoreApplication::setOrganizationName(QStringLiteral("ArchiDev2"));
+    QCoreApplication::setApplicationName(QStringLiteral("ArchiDev2"));
+
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("ArchiDev2 - consultant/developer AI workspace"));
+    parser.addHelpOption();
+    QCommandLineOption optCProg(QStringLiteral("consultant-program"),
+        QStringLiteral("Development override: run this executable as Consultant."), QStringLiteral("program"));
+    QCommandLineOption optDProg(QStringLiteral("developer-program"),
+        QStringLiteral("Development override: run this executable as Developer."), QStringLiteral("program"));
+    parser.addOption(optCProg);
+    parser.addOption(optDProg);
+    parser.addPositionalArgument(QStringLiteral("project"), QStringLiteral("Project directory (Developer cwd)."));
+    parser.addPositionalArgument(QStringLiteral("consultant"),
+        QStringLiteral("Consultant directory (optional; remembered between runs)."));
+    parser.process(app);
+
+    const QStringList pos = parser.positionalArguments();
+    if (pos.isEmpty()) {
+        err << "usage: archidev2-qt [--consultant-program P] [--developer-program P] <project-dir> [consultant-dir]\n";
         return 2;
     }
     QString projectDir, consultantDir, msg;
-    if (!resolveDir(a.at(1), &projectDir, &msg))    { err << "project dir: "    << msg << "\n"; return 2; }
-    if (!resolveDir(a.at(2), &consultantDir, &msg)) { err << "consultant dir: " << msg << "\n"; return 2; }
-    const QString consultantProg = a.at(3), developerProg = a.at(4);
-    for (const QString &p : {consultantProg, developerProg})
-        if (QStandardPaths::findExecutable(p).isEmpty()) { err << "not on PATH: " << p << "\n"; return 2; }
+    if (!resolveDir(pos.at(0), &projectDir, &msg)) { err << "project dir: " << msg << "\n"; return 2; }
 
-    QTermWidget *consultant = makeTerm(consultantProg, consultantDir);
-    QTermWidget *developer  = makeTerm(developerProg, projectDir);
+    // Consultant directory: explicit argument wins and is remembered; else the
+    // remembered one; else ask once. Cancelling the first-run chooser exits
+    // without starting any AI session.
+    QSettings settings;
+    if (pos.size() >= 2) {
+        if (!resolveDir(pos.at(1), &consultantDir, &msg)) { err << "consultant dir: " << msg << "\n"; return 2; }
+        settings.setValue(QStringLiteral("consultantDir"), consultantDir);
+    } else {
+        const QString remembered = settings.value(QStringLiteral("consultantDir")).toString();
+        if (remembered.isEmpty() || !resolveDir(remembered, &consultantDir, &msg)) {
+            const QString picked = QFileDialog::getExistingDirectory(nullptr,
+                QStringLiteral("Choose the consultant working directory"), QDir::homePath());
+            if (picked.isEmpty()) { err << "no consultant directory chosen - nothing was launched\n"; return 3; }
+            if (!resolveDir(picked, &consultantDir, &msg)) { err << "consultant dir: " << msg << "\n"; return 3; }
+            settings.setValue(QStringLiteral("consultantDir"), consultantDir);
+        }
+    }
+
+    // Profiles: user file first, built-ins appended only for names it does not use.
+    QStringList profileProblems;
+    QVector<AiProfile> profiles = mergeWithBuiltins(loadAiProfiles(aiProfilesPath(), &profileProblems));
+    const QString ovC = parser.value(optCProg), ovD = parser.value(optDProg);
+    for (const QString &ov : {ovC, ovD}) {              // development overrides appear as profiles
+        if (ov.isEmpty()) continue;
+        const QString nm = QStringLiteral("Override: %1").arg(QFileInfo(ov).fileName());
+        bool have = false;
+        for (const auto &pr : profiles) if (pr.name == nm) have = true;
+        if (!have) profiles.prepend(AiProfile{nm, ov, {}});
+    }
+
     auto *editor = new QPlainTextEdit;
     editor->setPlaceholderText(QStringLiteral("EDITOR - double-click a file, type, or route text in"));
 
@@ -112,10 +183,13 @@ int main(int argc, char **argv) {
     tree->setHeaderHidden(true);
     tree->setAnimated(false);
 
-    QLabel *hC = nullptr, *hD = nullptr, *hE = nullptr, *hF = nullptr;
+    Role rc, rd;
+    rc.cwd = consultantDir;
+    rd.cwd = projectDir;
+    QLabel *hE = nullptr, *hF = nullptr;
     auto *terms = new QSplitter(Qt::Horizontal);
-    terms->addWidget(labelled(QStringLiteral("CONSULTANT"), consultantProg + " @ " + consultantDir, consultant, &hC));
-    terms->addWidget(labelled(QStringLiteral("DEVELOPER"),  developerProg  + " @ " + projectDir,    developer,  &hD));
+    terms->addWidget(labelled(QStringLiteral("CONSULTANT"), consultantDir, nullptr, &rc.header, &rc.slot));
+    terms->addWidget(labelled(QStringLiteral("DEVELOPER"),  projectDir,    nullptr, &rd.header, &rd.slot));
     auto *rightSplit = new QSplitter(Qt::Vertical);
     rightSplit->addWidget(terms);
     rightSplit->addWidget(labelled(QStringLiteral("EDITOR"), QStringLiteral("(no file)"), editor, &hE));
@@ -233,9 +307,9 @@ int main(int argc, char **argv) {
     // --- selection -------------------------------------------------------
     // Read live at send time, never cached, so a selection that has since
     // vanished can never be routed as stale text.
-    auto liveText = [consultant, developer, editor](Surface s) -> QString {
-        if (s == SConsultant) return consultant->selectedText(true);
-        if (s == SDeveloper)  return developer->selectedText(true);
+    auto liveText = [&](Surface s) -> QString {          // by reference: survives a restart
+        if (s == SConsultant) return rc.term ? rc.term->selectedText(true) : QString();
+        if (s == SDeveloper)  return rd.term ? rd.term->selectedText(true) : QString();
         if (s == SEditor) {
             QString t = editor->textCursor().selectedText();
             return t.replace(QChar(0x2029), QLatin1Char('\n'));   // QTextCursor uses U+2029
@@ -259,7 +333,8 @@ int main(int argc, char **argv) {
             while (text.endsWith(QLatin1Char('\n')) || text.endsWith(QLatin1Char('\r')))
                 text.chop(1);                                     // never submit
             if (text.isEmpty()) { say(QStringLiteral("Selection is only line breaks")); return; }
-            QTermWidget *t = (dest == SConsultant) ? consultant : developer;
+            QTermWidget *t = (dest == SConsultant) ? rc.term : rd.term;
+            if (!t) { say(QStringLiteral("%1 has no running session").arg(kName[dest])); return; }
             const int visible = text.size();      // count before bracketing adds marker bytes
             t->bracketText(text);   // wraps in \e[200~..\e[201~ only if the app enabled it
             t->sendText(text);      // exactly these bytes; no Enter is ever appended
@@ -293,37 +368,167 @@ int main(int argc, char **argv) {
     // --- focus indication + selection tracking ---------------------------
     auto markFocus = [&](Surface s) {
         focused = s;
-        QLabel *hs[] = {hC, hD, hE};
+        QLabel *hs[] = {rc.header, rd.header, hE};
         for (int i = 0; i < 3; ++i)
             hs[i]->setStyleSheet(i == s ? QStringLiteral("font-weight:bold; background:#cde8ff;") : QString());
     };
-    QObject::connect(consultant, &QTermWidget::termGetFocus, [&] { markFocus(SConsultant); });
-    QObject::connect(developer,  &QTermWidget::termGetFocus, [&] { markFocus(SDeveloper); });
     QObject::connect(editor, &QPlainTextEdit::cursorPositionChanged, [&] { markFocus(SEditor); });
-    QObject::connect(consultant, &QTermWidget::copyAvailable, [&](bool on) {
-        if (on) { lastSel = SConsultant;
-                  say(QStringLiteral("CONSULTANT selection: %1 chars").arg(liveText(SConsultant).size())); }
-    });
-    QObject::connect(developer, &QTermWidget::copyAvailable, [&](bool on) {
-        if (on) { lastSel = SDeveloper;
-                  say(QStringLiteral("DEVELOPER selection: %1 chars").arg(liveText(SDeveloper).size())); }
-    });
     QObject::connect(editor, &QPlainTextEdit::selectionChanged, [&] {
         if (editor->textCursor().hasSelection()) lastSel = SEditor;
     });
 
+    // --- role sessions ---------------------------------------------------
+    // Restarting replaces the QTermWidget rather than trying to revive a
+    // finished session: QTermWidget has no restart entry point, only
+    // construct -> startShellProgram -> finished(). The widget is swapped
+    // inside its own frame layout, so splitter sizes and layout position are
+    // untouched and the other role is never disturbed.
+    auto profileByName = [&](const QString &n) -> AiProfile {
+        for (const auto &pr : profiles) if (pr.name == n) return pr;
+        return AiProfile{};
+    };
+    auto refreshPending = [&](Role &r) {
+        const bool differs = r.combo && r.combo->currentText() != r.runningProfile;
+        const bool noSession = (r.term == nullptr);
+        r.pending->setText(differs || noSession ? QStringLiteral("Restart to apply") : QString());
+        r.pending->setStyleSheet(QStringLiteral("color:#b04000; font-weight:bold;"));
+    };
+    auto launchRole = [&](Role &r, Surface which, const AiProfile &p) -> bool {
+        if (p.name.isEmpty())       { say(QStringLiteral("%1: no profile selected").arg(kName[which])); return false; }
+        if (!p.available()) {        // validate BEFORE touching a working session
+            say(QStringLiteral("%1: executable not found for profile \"%2\" (%3) - session unchanged")
+                    .arg(kName[which], p.name, p.program));
+            return false;
+        }
+        retireTerm(r.term);                       // hangs up only this role's own child
+        r.term = makeTerm(p, r.cwd);
+        r.slot->addWidget(r.term);
+        r.runningProfile = p.name;
+        r.header->setText(QStringLiteral("%1   %2 @ %3").arg(kName[which], p.name, r.cwd));
+        QObject::connect(r.term, &QTermWidget::termGetFocus, [&, which] { markFocus(which); });
+        QObject::connect(r.term, &QTermWidget::copyAvailable, [&, which](bool on) {
+            if (on) { lastSel = which;
+                      say(QStringLiteral("%1 selection: %2 chars").arg(kName[which]).arg(liveText(which).size())); }
+        });
+        refreshPending(r);
+        return true;
+    };
+    auto restartRole = [&](Role &r, Surface which) {
+        const AiProfile p = profileByName(r.combo->currentText());
+        if (!p.available()) {
+            say(QStringLiteral("%1: cannot start \"%2\" - %3 not found. Existing session left running.")
+                    .arg(kName[which], p.name, p.program));
+            return;
+        }
+        if (r.term && QMessageBox::question(win, QStringLiteral("Restart %1").arg(kName[which]),
+                QStringLiteral("This ends the current %1 session and starts \"%2\" in\n%3\n\nContinue?")
+                    .arg(kName[which], p.name, r.cwd),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+            say(QStringLiteral("%1 restart cancelled - session untouched").arg(kName[which]));
+            return;
+        }
+        if (launchRole(r, which, p)) {
+            settings.setValue(which == SConsultant ? QStringLiteral("consultantProfile")
+                                                   : QStringLiteral("developerProfile"), p.name);
+            say(QStringLiteral("%1 restarted with \"%2\" in %3").arg(kName[which], p.name, r.cwd));
+        }
+    };
+
+    // Row of role controls: profile choice + explicit restart, per role.
+    auto *roleBar = new QHBoxLayout;
+    auto addRole = [&](Role &r, Surface which, const QString &label) {
+        r.combo = new QComboBox;
+        r.combo->setFocusPolicy(Qt::NoFocus);
+        for (const auto &pr : profiles)
+            r.combo->addItem(pr.available() ? pr.name : QStringLiteral("%1  (not installed)").arg(pr.name), pr.name);
+        r.pending = new QLabel;
+        auto *btn = new QPushButton(QStringLiteral("Restart %1").arg(label));
+        btn->setFocusPolicy(Qt::NoFocus);
+        QObject::connect(btn, &QPushButton::clicked, [&, which] { restartRole(r, which); });
+        QObject::connect(r.combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                         [&] { refreshPending(r); });     // never restarts on its own
+        roleBar->addWidget(new QLabel(QStringLiteral("%1 AI:").arg(label)));
+        roleBar->addWidget(r.combo);
+        roleBar->addWidget(btn);
+        roleBar->addWidget(r.pending);
+        roleBar->addSpacing(18);
+    };
+    addRole(rc, SConsultant, QStringLiteral("Consultant"));
+    addRole(rd, SDeveloper,  QStringLiteral("Developer"));
+
+    auto *bDir = new QPushButton(QStringLiteral("Change Consultant Directory..."));
+    bDir->setFocusPolicy(Qt::NoFocus);
+    QObject::connect(bDir, &QPushButton::clicked, [&] {
+        const QString picked = QFileDialog::getExistingDirectory(win,
+            QStringLiteral("Choose the consultant working directory"), rc.cwd);
+        if (picked.isEmpty()) { say(QStringLiteral("Consultant directory unchanged")); return; }
+        QString resolved, why;
+        if (!resolveDir(picked, &resolved, &why)) { say(QStringLiteral("Not usable: %1").arg(why)); return; }
+        rc.cwd = resolved;
+        settings.setValue(QStringLiteral("consultantDir"), resolved);
+        rc.header->setText(QStringLiteral("CONSULTANT   %1 @ %2").arg(rc.runningProfile, rc.cwd));
+        rc.pending->setText(QStringLiteral("Restart to apply"));
+        say(QStringLiteral("Consultant directory is now %1 - restart Consultant to use it").arg(resolved));
+    });
+    roleBar->addWidget(bDir);
+    roleBar->addStretch(1);
+
+    // Restore the remembered profile per role, else a sensible available default.
+    auto initialFor = [&](const QString &key, const QString &prefer, const QString &override) -> AiProfile {
+        if (!override.isEmpty())
+            for (const auto &pr : profiles) if (pr.program == override) return pr;
+        const QString saved = settings.value(key).toString();
+        for (const auto &pr : profiles) if (pr.name == saved && pr.available()) return pr;
+        for (const auto &pr : profiles) if (pr.name == prefer && pr.available()) return pr;
+        for (const auto &pr : profiles) if (pr.available()) return pr;
+        return AiProfile{};
+    };
+    const AiProfile startC = initialFor(QStringLiteral("consultantProfile"), QStringLiteral("Codex"), ovC);
+    const AiProfile startD = initialFor(QStringLiteral("developerProfile"),  QStringLiteral("Claude"), ovD);
+    if (!startC.name.isEmpty()) rc.combo->setCurrentIndex(rc.combo->findData(startC.name));
+    if (!startD.name.isEmpty()) rd.combo->setCurrentIndex(rd.combo->findData(startD.name));
+
     win->allowClose = [&] { return confirmDiscard(QStringLiteral("Save before closing?")); };
     auto *root = new QVBoxLayout(win);
+    root->addLayout(roleBar);
     root->addLayout(bar);
     root->addWidget(outer, 1);
     root->addWidget(status);
     win->resize(1500, 900);
     win->show();
     refreshDoc();
-    say(QStringLiteral("Select text in any surface, then click a destination. Double-click a file to edit it."));
+    launchRole(rc, SConsultant, startC);
+    launchRole(rd, SDeveloper,  startD);
+    for (const QString &pb : profileProblems) say(QStringLiteral("Profile problem - %1").arg(pb));
+    if (profiles.isEmpty())
+        say(QStringLiteral("No usable AI profiles. Create %1 - see ai-profiles.example.json")
+                .arg(aiProfilesPath()));
+    else if (profileProblems.isEmpty())
+        say(QStringLiteral("Select text in any surface, then click a destination. Double-click a file to edit it."));
 
     // Spike-only, non-interactive check (ARCHIDEV2_SPIKE_SELFTEST=<file>):
     // exercises the real routing and save paths so they can be proven headlessly.
+    // Spike-only: restart a role without the confirmation dialog, then prove
+    // routing still reaches it (i.e. the swapped widget was re-wired).
+    const QString restartWho = qEnvironmentVariable("ARCHIDEV2_SPIKE_RESTART");
+    if (!restartWho.isEmpty()) {
+        QTimer::singleShot(1500, [&, restartWho] {
+            Role &r  = (restartWho == QLatin1String("consultant")) ? rc : rd;
+            Surface w = (restartWho == QLatin1String("consultant")) ? SConsultant : SDeveloper;
+            const int oldPid = r.term ? r.term->getShellPID() : -1;
+            launchRole(r, w, profileByName(r.combo->currentText()));
+            const int newPid = r.term ? r.term->getShellPID() : -1;
+            err << "[restart] role=" << restartWho << " oldPid=" << oldPid << " newPid=" << newPid
+                << " otherAlive=" << ((&r == &rc ? rd.term : rc.term) != nullptr) << "\n";
+            err.flush();
+            QTimer::singleShot(1500, [&, w] {          // routing must still work afterwards
+                editor->setPlainText(QStringLiteral("post-restart routing probe"));
+                editor->selectAll();
+                sendTo(w);
+            });
+        });
+    }
+
     const QString selftest = qEnvironmentVariable("ARCHIDEV2_SPIKE_SELFTEST");
     if (!selftest.isEmpty()) {
         QTimer::singleShot(2000, [&, selftest] {

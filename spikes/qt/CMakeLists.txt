@@ -31,6 +31,6 @@ if(_qtw_link)
     set_target_properties(qtermwidget5 PROPERTIES INTERFACE_LINK_LIBRARIES "${_qtw_kept}")
 endif()
 
-add_executable(archidev2-qt main.cpp)
+add_executable(archidev2-qt main.cpp profiles.cpp)
 target_link_libraries(archidev2-qt PRIVATE Qt5::Widgets qtermwidget5)
 target_compile_options(archidev2-qt PRIVATE -Wall -Wextra -Wpedantic)

@@ -6,8 +6,9 @@ application is built:
 > Can ArchiDev2 read a selection from a terminal or an editor, insert it into another surface
 > **without it being submitted**, and move focus — with persistent clickable buttons?
 
-Routing is proven. This iteration adds the stock Qt file tree and single-document editing on
-top of it. Still deliberately absent: AI profiles, settings, packaging and tests.
+Routing, the stock Qt file tree and single-document editing are proven. This iteration adds
+generic AI command profiles, per-role dropdowns with explicit restart, and a remembered
+consultant directory. Still deliberately absent: a settings screen, packaging and tests.
 
 ## Build and run
 
@@ -126,6 +127,18 @@ not gain one.
 Confirmed by hand against Codex and Claude: both render and accept input inside QTermWidget, a
 normal mouse drag selects, `selectedText()` returns it, clicking a destination button preserves
 and routes the selection, multiline text arrives unsubmitted, and focus moves.
+
+## Known limitations
+
+- **`$` in a profile field cannot be passed literally.** QTermWidget's
+  `Session::setProgram/setArguments/setInitialWorkingDirectory` all run `ShellCommand::expand()`,
+  which substitutes `$VAR`. Its `\$` escape skips the expansion but leaves the backslash behind,
+  so there is no way through the public API to deliver a literal `$`. ArchiDev2 warns when a
+  profile contains one instead of letting it surprise you. Spaces and `; | & *` are unaffected
+  and pass through byte-for-byte.
+- No Save As, no tabs, no syntax highlighting, no settings screen.
+- The Developer directory is fixed to the launch argument; only the Consultant directory can be
+  changed at runtime.
 
 ## Still unproven — needs your eyes
 
