@@ -90,7 +90,7 @@ developer_profile=Claude
 
 [profiles/Codex]
 program=codex
-arguments=
+arguments=--no-alt-screen
 
 [profiles/Claude]
 program=claude
@@ -206,6 +206,21 @@ than falling back. Routing buttons remain enabled because QTermWidget does not r
 mouse selection changes. Buttons use `Qt::NoFocus`, so clicking one cannot disturb the selection
 it is about to read. In the two AI terminal panes, left-button drag selects locally even when
 the child program enables mouse reporting; wheel events still reach the program for scrolling.
+
+Dragging past the top or bottom edge of a terminal scrolls its history and keeps extending the
+selection while the pointer stays outside, so a selection can span many screens. That only works
+for text the terminal actually holds. The alternate screen has no history: a program drawing
+there (Codex by default) keeps everything off-screen to itself, and its wheel scrolling redraws
+the pane rather than scrolling the terminal. The Codex profile therefore passes
+`--no-alt-screen`, which writes the transcript into ordinary scrollback. The two AI terminals
+keep 20000 lines of history (QTermWidget's default is 1000); the Project Shell keeps the default.
+If a drag leaves a pane that has no scrollback, the status line says so. An existing INI that
+still has `arguments=` under `[profiles/Codex]` needs `--no-alt-screen` added by hand.
+
+QTermWidget 1.4.0 does not reflow on resize (`Screen::resizeImage` only truncates or pads), and
+its screen classes are not public API. Inline Codex does the reflow itself: once a resize
+settles it clears the screen and scrollback (`CSI 2J`, `CSI 3J`) and reprints the transcript at
+the new width, which QTermWidget honours.
 
 For terminal destinations the text has trailing CR/LF stripped (interior newlines preserved),
 goes through `QTermWidget::bracketText()` — which wraps in `\e[200~…\e[201~` only when the

@@ -15,8 +15,12 @@ QString AiProfile::resolvedProgram() const {
     return QStandardPaths::findExecutable(program);      // PATH lookup, no shell
 }
 
+// Codex defaults to the alternate screen, which has no terminal scrollback:
+// its history would be reachable only through Codex's own wheel scrolling and
+// could never be selected past the visible pane. Inline mode writes the
+// transcript into ordinary scrollback instead.
 QVector<AiProfile> builtinAiProfiles() {
-    return {AiProfile{QStringLiteral("Codex"),  QStringLiteral("codex"),  {}},
+    return {AiProfile{QStringLiteral("Codex"),  QStringLiteral("codex"),  {QStringLiteral("--no-alt-screen")}},
             AiProfile{QStringLiteral("Claude"), QStringLiteral("claude"), {}}};
 }
 

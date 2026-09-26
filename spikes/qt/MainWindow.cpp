@@ -38,13 +38,23 @@ static const qint64 kMaxOpenBytes     = 8 * 1024 * 1024;  // editor open limit
 static const qint64 kMaxSendBytes     = 256 * 1024;       // hard limit for file -> terminal
 static const qint64 kConfirmSendBytes = 16 * 1024;        // ask above this
 
+static const int kAiHistoryLines = 20000;           // QTermWidget default is 1000
+
 // QTermWidget forwards ordinary left drags to a child program when it enables
 // mouse reporting. Its own selection path is selected by Shift. Apply that
 // modifier only to left-button events on the terminal display; wheel events
 // still reach the child program so Codex can scroll its conversation.
+//
+// Dragging past the top or bottom edge scrolls the terminal's own history
+// (TerminalDisplay::extendSelection, repeated by its AutoScrollHandler timer
+// while the pointer stays outside). The alternate screen has no history at
+// all, so a program drawing there keeps everything off-screen to itself and
+// no terminal-side selection can reach it. onDragPastEdge fires once per drag
+// so the window can say so instead of failing silently.
 class TerminalSelectionFilter final : public QObject {
 public:
-    using QObject::QObject;
+    TerminalSelectionFilter(QWidget *display, std::function<void()> onDragPastEdge)
+        : QObject(display), m_onDragPastEdge(std::move(onDragPastEdge)) {}
 
 protected:
     bool eventFilter(QObject *target, QEvent *event) override {
@@ -61,6 +71,15 @@ protected:
         auto *mouse = static_cast<QMouseEvent *>(event);
         if (mouse->button() != Qt::LeftButton && !(mouse->buttons() & Qt::LeftButton))
             return false;
+        if (event->type() == QEvent::MouseButtonPress) {
+            m_edgeReported = false;
+        } else if (event->type() == QEvent::MouseMove && !m_edgeReported) {
+            const int y = mouse->pos().y();
+            if (y < 0 || y >= static_cast<QWidget *>(target)->height()) {
+                m_edgeReported = true;
+                if (m_onDragPastEdge) m_onDragPastEdge();
+            }
+        }
         QMouseEvent selectionEvent(mouse->type(), mouse->localPos(), mouse->windowPos(),
                                    mouse->screenPos(), mouse->button(), mouse->buttons(),
                                    mouse->modifiers() | Qt::ShiftModifier, mouse->source());
@@ -70,7 +89,9 @@ protected:
     }
 
 private:
+    std::function<void()> m_onDragPastEdge;
     bool m_forwarding = false;
+    bool m_edgeReported = false;
 };
 
 // Retire a terminal we own: hang up its own child PID, then delete the widget.
@@ -443,9 +464,18 @@ bool MainWindow::launchTerm(Term &t, Surface which, const AiProfile &p) {
     retireTerm(t.term);
     t.term = new QTermWidget(0);                    // 0 = do not auto-start a shell
     if (which != SShell) {
+        t.term->setHistorySize(kAiHistoryLines);
         for (QWidget *child : t.term->findChildren<QWidget *>()) {
             if (qstrcmp(child->metaObject()->className(), "Konsole::TerminalDisplay") == 0) {
-                child->installEventFilter(new TerminalSelectionFilter(child));
+                // historyLinesCount() reports the screen being shown; the
+                // alternate screen always reports 0.
+                child->installEventFilter(new TerminalSelectionFilter(child, [this, &t, which] {
+                    if (!t.term || t.term->historyLinesCount() > 0) return;
+                    say(QStringLiteral("%1 has no terminal scrollback, so the selection cannot extend "
+                                       "past the pane. Programs on the alternate screen keep their "
+                                       "history to themselves; for Codex add --no-alt-screen to "
+                                       "the profile arguments.").arg(kName[which]), "warn");
+                }));
                 break;
             }
         }
