@@ -6,18 +6,24 @@
 #include "Theme.h"
 
 #include <QAction>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScopedValueRollback>
 #include <QSplitter>
 #include <QStyle>
 #include <QTextStream>
@@ -31,6 +37,41 @@ static const char *kShort[] = {"Consultant", "Developer", "Shell", "Notes"};
 static const qint64 kMaxOpenBytes     = 8 * 1024 * 1024;  // editor open limit
 static const qint64 kMaxSendBytes     = 256 * 1024;       // hard limit for file -> terminal
 static const qint64 kConfirmSendBytes = 16 * 1024;        // ask above this
+
+// QTermWidget forwards ordinary left drags to a child program when it enables
+// mouse reporting. Its own selection path is selected by Shift. Apply that
+// modifier only to left-button events on the terminal display; wheel events
+// still reach the child program so Codex can scroll its conversation.
+class TerminalSelectionFilter final : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject *target, QEvent *event) override {
+        if (m_forwarding) return false;
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::MouseMove:
+            break;
+        default:
+            return false;
+        }
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() != Qt::LeftButton && !(mouse->buttons() & Qt::LeftButton))
+            return false;
+        QMouseEvent selectionEvent(mouse->type(), mouse->localPos(), mouse->windowPos(),
+                                   mouse->screenPos(), mouse->button(), mouse->buttons(),
+                                   mouse->modifiers() | Qt::ShiftModifier, mouse->source());
+        QScopedValueRollback<bool> forwarding(m_forwarding, true);
+        QCoreApplication::sendEvent(target, &selectionEvent);
+        return true;
+    }
+
+private:
+    bool m_forwarding = false;
+};
 
 // Retire a terminal we own: hang up its own child PID, then delete the widget.
 // Only ever this one PID - no process-name matching, no pkill, no shell.
@@ -166,12 +207,20 @@ QWidget *MainWindow::makePane(const QString &title, QWidget *inner, QLabel **hdr
 // disabled even with a valid selection. routeFrom() reads the live selection
 // and names the source when there is none, which is both dependable and more
 // informative than a disabled button.
-QHBoxLayout *MainWindow::makeRouteBar(Surface source, const QVector<Surface> &destinations) {
+QHBoxLayout *MainWindow::makeRouteBar(Surface source, const QVector<Surface> &destinations,
+                                      int stretchAfter) {
     auto *bar = new QHBoxLayout;
     bar->setContentsMargins(0, 0, 0, 0);
     bar->setSpacing(4);
-    for (Surface dest : destinations) {
-        auto *b = new QPushButton(QStringLiteral("→ %1").arg(QLatin1String(kShort[dest])));
+    for (int i = 0; i < destinations.size(); ++i) {
+        if (i == stretchAfter) bar->addStretch(1);   // pushes the rest to the far edge
+        const Surface dest = destinations.at(i);
+        QString label = QStringLiteral("→ %1").arg(QLatin1String(kShort[dest]));
+        if (source == SConsultant && dest == SDeveloper)
+            label = QStringLiteral("Developer →");
+        else if (source == SDeveloper && dest == SConsultant)
+            label = QStringLiteral("← Consultant");
+        auto *b = new QPushButton(label);
         b->setObjectName(QStringLiteral("routeButton"));
         b->setFocusPolicy(Qt::NoFocus);   // must not steal the source's selection
         b->setToolTip(QStringLiteral("Send the text selected in %1 to %2.\n"
@@ -180,7 +229,8 @@ QHBoxLayout *MainWindow::makeRouteBar(Surface source, const QVector<Surface> &de
         connect(b, &QPushButton::clicked, this, [this, source, dest] { routeFrom(source, dest); });
         bar->addWidget(b);
     }
-    bar->addStretch(1);
+    // Without an interior gap the group stays left-aligned, as before.
+    if (stretchAfter < 0) bar->addStretch(1);
     return bar;
 }
 
@@ -243,7 +293,8 @@ QWidget *MainWindow::buildConsultantArea() {
     roleBar->addWidget(m_consultantCollapse);
     roleBar->addStretch(1);
     tv->addLayout(roleBar);
-    tv->addLayout(makeRouteBar(SConsultant, {SDeveloper, SNotes, SShell}));
+    // Developer sits at the right edge, nearest the Developer pane.
+    tv->addLayout(makeRouteBar(SConsultant, {SNotes, SShell, SDeveloper}, 2));
     tv->addWidget(makePane(m_consultant.title, nullptr, &m_consultant.header,
                            &m_consultant.slot, &m_consultant.frame), 1);
 
@@ -280,7 +331,8 @@ QWidget *MainWindow::buildDeveloperArea() {
     addRoleControls(roleBar, m_developer, SDeveloper, QStringLiteral("Developer AI"));
     roleBar->addStretch(1);
     v->addLayout(roleBar);
-    v->addLayout(makeRouteBar(SDeveloper, {SConsultant, SNotes, SShell}));
+    // Consultant sits at the left edge, nearest the Consultant pane.
+    v->addLayout(makeRouteBar(SDeveloper, {SConsultant, SNotes, SShell}, 1));
     v->addWidget(makePane(m_developer.title, nullptr, &m_developer.header,
                           &m_developer.slot, &m_developer.frame), 1);
     return box;
@@ -390,18 +442,82 @@ bool MainWindow::launchTerm(Term &t, Surface which, const AiProfile &p) {
     }
     retireTerm(t.term);
     t.term = new QTermWidget(0);                    // 0 = do not auto-start a shell
+    if (which != SShell) {
+        for (QWidget *child : t.term->findChildren<QWidget *>()) {
+            if (qstrcmp(child->metaObject()->className(), "Konsole::TerminalDisplay") == 0) {
+                child->installEventFilter(new TerminalSelectionFilter(child));
+                break;
+            }
+        }
+    }
     t.term->setShellProgram(p.resolvedProgram());   // absolute path; no shell involved
     t.term->setArgs(p.arguments);                   // preserved exactly, never re-parsed
     t.term->setWorkingDirectory(t.cwd);
     t.term->setTerminalSizeHint(false);
     t.term->setColorScheme(QLatin1String(Theme::TerminalScheme));
+    // Deterministic paste behaviour, identical for all three terminals.
+    // Trailing newlines are dropped so an external paste can never submit the
+    // prompt; interior newlines are untouched (the trim is a /\r+$/ replace).
+    t.term->setTrimPastedTrailingNewlines(true);
+    t.term->setConfirmMultilinePaste(false);
     t.term->startShellProgram();
     t.slot->addWidget(t.term);
     t.runningProfile = p.name;
     t.header->setText(QStringLiteral("%1   %2 @ %3").arg(t.title, p.name, t.cwd));
     connect(t.term, &QTermWidget::termGetFocus, this, [this, which] { markFocus(which); });
+    installClipboardShortcuts(t, which);
     refreshPending(t);
     return true;
+}
+
+// System-clipboard copy/paste for a terminal.
+//
+// QTermWidget 1.4.0 ships no keyboard shortcuts at all - grepping the library
+// for QShortcut/setShortcut returns nothing, and its keytabs do not bind
+// Ctrl+Shift+C/V either. Those keystrokes therefore fell straight through to
+// the AI child in every terminal, which is why one child reported an
+// image-paste error while another happened to handle the key itself. The
+// widget does expose copyClipboard()/pasteClipboard(), so the application owns
+// the bindings.
+//
+// Qt::WidgetWithChildrenShortcut scopes each action to its own terminal: the
+// shortcut only fires for the focused terminal, three identical bindings in one
+// window cannot become ambiguous, and Notes keeps QPlainTextEdit's own Ctrl+C /
+// Ctrl+V untouched.
+void MainWindow::installClipboardShortcuts(Term &t, Surface which) {
+    auto add = [&](const QKeySequence &seq, std::function<void()> fn) {
+        auto *a = new QAction(t.term);          // owned by the terminal, dies with it
+        a->setShortcut(seq);
+        a->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        connect(a, &QAction::triggered, this, fn);
+        t.term->addAction(a);
+    };
+
+    add(QKeySequence(QStringLiteral("Ctrl+Shift+C")), [this, &t, which] {
+        if (!t.term) return;
+        const QString sel = t.term->selectedText(true);
+        if (sel.isEmpty()) {
+            say(QStringLiteral("Nothing selected in %1 to copy").arg(kName[which]), "warn");
+            return;
+        }
+        t.term->copyClipboard();                // -> QClipboard::Clipboard
+        say(QStringLiteral("Copied %1 chars from %2 to the system clipboard")
+                .arg(sel.size()).arg(kName[which]));
+    });
+
+    add(QKeySequence(QStringLiteral("Ctrl+Shift+V")), [this, &t, which] {
+        if (!t.term) return;
+        const QClipboard *cb = QGuiApplication::clipboard();
+        const QString text = cb ? cb->text(QClipboard::Clipboard) : QString();
+        if (text.isEmpty()) {
+            // Do not hand the AI child a keystroke it will misread as something else.
+            say(QStringLiteral("Clipboard has no text to paste into %1").arg(kName[which]), "warn");
+            return;
+        }
+        t.term->pasteClipboard();   // bracketed where supported; never appends Enter
+        say(QStringLiteral("Pasted %1 chars from the system clipboard into %2 - not submitted")
+                .arg(text.size()).arg(kName[which]));
+    });
 }
 
 void MainWindow::restartAi(Term &t, Surface which) {

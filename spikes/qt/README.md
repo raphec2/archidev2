@@ -12,7 +12,7 @@ settings application.
 ```
 ┌──────────────────────────────────────────┬────────────────────────────────────┐
 │ Consultant AI: [profile ▾][Restart][Hide]│ Developer AI: [profile ▾][Restart] │
-│ [→ Developer] [→ Notes] [→ Shell]        │ [→ Consultant] [→ Notes] [→ Shell] │
+│ [→ Notes] [→ Shell]       [Developer →]  │ [← Consultant] [→ Notes] [→ Shell] │
 │ ┌───────────────┬──────────────────────┐ │                                    │
 │ │ CONSULTANT    │ CONSULTANT terminal  │ │ DEVELOPER terminal                 │
 │ │ FILES         │                      │ │                                    │
@@ -195,16 +195,17 @@ Each source gets buttons for the other three surfaces only, so nothing can targe
 
 | Source | Buttons | Reads |
 |---|---|---|
-| Consultant | → Developer, → Notes, → Shell | `consultantTerminal->selectedText(true)` |
-| Developer | → Consultant, → Notes, → Shell | `developerTerminal->selectedText(true)` |
+| Consultant | → Notes, → Shell, Developer → | `consultantTerminal->selectedText(true)` |
+| Developer | ← Consultant, → Notes, → Shell | `developerTerminal->selectedText(true)` |
 | Notes | → Consultant, → Developer, → Shell | `editor->textCursor().selectedText()` |
 | Project Shell | → Consultant, → Developer, → Notes | `shellTerminal->selectedText(true)` |
 
 The selection is read live at click time, never cached and never borrowed. A source with nothing
 selected reports `Nothing selected in CONSULTANT` (or DEVELOPER / NOTES / PROJECT SHELL) rather
-than falling back. Each group's buttons enable and disable from their own source's selection
-signal. Buttons use `Qt::NoFocus`, so clicking one cannot disturb the selection it is about to
-read.
+than falling back. Routing buttons remain enabled because QTermWidget does not reliably signal
+mouse selection changes. Buttons use `Qt::NoFocus`, so clicking one cannot disturb the selection
+it is about to read. In the two AI terminal panes, left-button drag selects locally even when
+the child program enables mouse reporting; wheel events still reach the program for scrolling.
 
 For terminal destinations the text has trailing CR/LF stripped (interior newlines preserved),
 goes through `QTermWidget::bracketText()` — which wraps in `\e[200~…\e[201~` only when the

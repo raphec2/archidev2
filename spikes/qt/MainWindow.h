@@ -60,7 +60,10 @@ private:
     // --- construction
     QWidget *makePane(const QString &title, QWidget *inner, QLabel **hdr,
                       QVBoxLayout **slot, QFrame **frame);
-    QHBoxLayout *makeRouteBar(Surface source, const QVector<Surface> &destinations);
+    // stretchAfter: index at which to insert a flexible gap, so a trailing
+    // group can sit against the far edge. -1 keeps the whole group left-aligned.
+    QHBoxLayout *makeRouteBar(Surface source, const QVector<Surface> &destinations,
+                              int stretchAfter = -1);
     QWidget *buildConsultantArea();
     QWidget *buildDeveloperArea();
     QWidget *buildBottomRow();
@@ -76,6 +79,7 @@ private:
     AiProfile shellProfile() const;
     void refreshPending(Term &t);
     Term *termFor(Surface s);
+    void installClipboardShortcuts(Term &t, Surface which);
     QComboBox *addRoleControls(QHBoxLayout *bar, Term &t, Surface which, const QString &label);
 
     // --- source-local routing
