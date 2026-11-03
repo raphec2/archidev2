@@ -11,7 +11,7 @@ settings application.
 
 ```
 ┌──────────────────────────────────────────┬────────────────────────────────────┐
-│ Consultant AI: [profile ▾][Restart][Hide]│ Developer AI: [profile ▾][Restart] │
+│ Consultant: [prof ▾][New][Resume…][Hide] │ Developer: [prof ▾][New][Resume…]  │
 │ [→ Notes] [→ Shell]       [Developer →]  │ [← Consultant] [→ Notes] [→ Shell] │
 │ ┌───────────────┬──────────────────────┐ │                                    │
 │ │ CONSULTANT    │ CONSULTANT terminal  │ │ DEVELOPER terminal                 │
@@ -49,7 +49,7 @@ Options (`--help` for the full list):
 ```
 
 CLI role/profile values apply to the current launch only. Choosing a profile in the UI and
-restarting *is* saved, because that is a deliberate workspace choice.
+starting a New Session or Resume with it *is* saved, because that is a deliberate workspace choice.
 
 ### One packaging workaround
 
@@ -169,16 +169,53 @@ entry is reported individually in the status line and never hides the valid ones
 `Codex` and `Claude` are appended only for names the INI does not define. Bare programs resolve
 through `PATH`; absolute paths are used as given. No shell is ever involved.
 
-## Roles, shell and restart
+## Roles, new sessions and resume
 
 ```
-Consultant AI: [profile ▾] [Restart] (Restart to apply)   Developer AI: [profile ▾] [Restart]   [Restart Shell]
+Consultant AI: [profile ▾] [New Session] [Resume…]    Developer AI: [profile ▾] [New Session] [Resume…]    [Restart Shell]
 ```
 
-Changing a dropdown never touches the running session — it only shows `Restart to apply`.
-Restart always confirms first, validates the executable *before* disturbing anything, hangs up
-only that role's own child PID, replaces the `QTermWidget` in its own frame, and reconnects the
-focus and selection signals. The other two terminals are untouched.
+Each dropdown starts out showing the profile that is actually running. Changing it never
+touches the running session — it only shows `Applies on New Session or Resume`.
+
+**New Session** always starts a *new* conversation. It confirms first (Cancel is the default),
+validates the executable *before* disturbing anything, hangs up only that role's own child PID,
+replaces the `QTermWidget` in its own frame, and reconnects the focus and selection signals.
+The other two terminals are untouched.
+
+**Resume…** continues an earlier conversation after a crash or restart, using the CLI's own
+history and its own resume option. ArchiDev2 records nothing about sessions. It works when the
+selected profile's program is `codex` or `claude` (by file name, so custom profiles such as a
+`codex` with extra arguments qualify); for any other program it says so and does nothing.
+
+- The dialog lists the conversations that CLI recorded **for this role's working directory**
+  (Consultant: the consultant directory; Developer: the project), most recently active first,
+  with last-active time, title, first prompt, start time and full session ID. A filter box
+  narrows the list.
+- **Nothing is preselected.** *Resume Selected Conversation* stays disabled until you pick a
+  row, Enter in the filter box does nothing, and Cancel leaves the running session untouched.
+- The chosen ID must be a UUID and is passed as one argv entry, never through a shell:
+  - Codex: `codex resume <profile arguments> <id>` (so `--no-alt-screen` is kept)
+  - Claude: `claude <profile arguments> --resume <id>`
+
+  No prompt argument is ever added, so nothing is typed or submitted. The pane header shows
+  `resumed <id>` (or `new session`) and the status line names the conversation.
+- *Copy Resume Command* copies the equivalent `cd <dir> && …` line for use in another terminal.
+- If the conversation is still open somewhere else, close it there first; neither CLI offers a
+  dependable way to detect that.
+
+Where the lists come from (private formats, read as observed in Codex CLI 0.166.0 and Claude
+Code 2.1.317; if a format changes, sessions just stop being listed):
+
+| CLI | Store | Title |
+|---|---|---|
+| Codex | `$CODEX_HOME` (default `~/.codex`) `sessions/YYYY/MM/DD/rollout-*.jsonl`; first record's `cwd` | `session_index.jsonl` `thread_name` |
+| Claude | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) `projects/<dir with / as ->/<id>.jsonl`; each file's `cwd` is checked | `custom-title`, else `ai-title`, else `summary` |
+
+Non-interactive `codex exec` runs and Claude conversations with no real user message are not
+listed. **Claude Code deletes transcripts older than 30 days by default** (it did so on this
+machine on 2026-11-03), so those can no longer be resumed; raise `cleanupPeriodDays` in
+`~/.claude/settings.json` to keep more. Codex kept its history.
 
 The **Project Shell** is your normal `$SHELL` (`-l` by default) in the project directory, for
 builds, tests, Git and package installs. It has no AI profile, has its own Restart, and is
@@ -207,6 +244,33 @@ mouse selection changes. Buttons use `Qt::NoFocus`, so clicking one cannot distu
 it is about to read. In the two AI terminal panes, left-button drag selects locally even when
 the child program enables mouse reporting; wheel events still reach the program for scrolling.
 
+### Scrolling and selecting in the AI panes
+
+What the CLIs ask of the terminal decides who handles the mouse. Captured from their startup
+output: `codex --no-alt-screen` and `claude` turn on **no** mouse reporting and no alternate
+screen, so drags and the wheel go to QTermWidget and scroll its own history. Plain `codex`
+uses the alternate screen with full mouse reporting (`?1049h`, `?1000/1002/1003/1006h`), so
+the wheel goes to Codex instead.
+
+In the Consultant and Developer panes:
+
+- **Wheel** scrolls the history 3 lines per notch (the desktop setting). **Shift+wheel**
+  scrolls a page. **Shift+PgUp/PgDn/Home/End** and **Shift+Up/Down** scroll
+  from the keyboard.
+- **Drag past the top or bottom edge** to keep extending the selection. ArchiDev2 speeds up
+  QTermWidget's edge scrolling the longer the pointer stays outside: roughly 25 lines/s at
+  first, several hundred after a few seconds. Holding one line above the edge for 3 s selected
+  ~629 lines, against ~73 with QTermWidget alone.
+- **Hold the button and use the wheel**: the selection follows each wheel step even without
+  moving the mouse, so *press, wheel, release* selects across any number of screens.
+- On release the status line reports how many lines and characters are selected.
+- Routing a selection larger than 16 KB into a terminal asks first (Cancel is the default).
+  Routing to Notes and `Ctrl+Shift+C` do not ask.
+
+Shift+click to extend an existing selection is not offered: QTermWidget 1.4.0's public
+`setSelectionStart` always switches to rectangular selection, and its selection anchor is
+private.
+
 Dragging past the top or bottom edge of a terminal scrolls its history and keeps extending the
 selection while the pointer stays outside, so a selection can span many screens. That only works
 for text the terminal actually holds. The alternate screen has no history: a program drawing
@@ -220,7 +284,13 @@ still has `arguments=` under `[profiles/Codex]` needs `--no-alt-screen` added by
 QTermWidget 1.4.0 does not reflow on resize (`Screen::resizeImage` only truncates or pads), and
 its screen classes are not public API. Inline Codex does the reflow itself: once a resize
 settles it clears the screen and scrollback (`CSI 2J`, `CSI 3J`) and reprints the transcript at
-the new width, which QTermWidget honours.
+the new width, which QTermWidget honours. A resize therefore also clears any selection.
+
+Inline Codex writes its transcript with a top-anchored scroll region and newlines, which
+QTermWidget saves to history line by line: a captured 150-line Codex reply replayed through
+QTermWidget kept every line, in order. (QTermWidget's `CSI n S` keeps only one of n lines, but
+Codex does not use it.) Codex places each wrapped row itself, so copied or routed paragraphs
+contain line breaks at the pane width; QTermWidget cannot tell those from real ones.
 
 For terminal destinations the text has trailing CR/LF stripped (interior newlines preserved),
 goes through `QTermWidget::bracketText()` — which wraps in `\e[200~…\e[201~` only when the
@@ -304,7 +374,8 @@ The three-terminal layout and proportions; the dark theme and whether the active
 reads clearly; Consultant vs Project explorer widths; collapse/restore; the notes flow including
 the creation prompt; restarting into **real** Codex/Claude sessions from the dropdowns; routing
 between all four surfaces by hand; multiline safety in a live AI prompt; and modal dialog
-readability.
+readability. In your normal window: edge-drag speed and wheel-while-dragging with your own
+mouse or touchpad, and Resume… into a real conversation in each role.
 
 ## Known limitations
 
@@ -314,7 +385,9 @@ readability.
 - No Save As, no tabs, no syntax highlighting, no settings screen, no third explorer.
 - The Developer and Shell directories are the launched project; only the consultant directory is
   configurable.
-- Notes creation and restart confirmations are modal, so scripted runs block on them.
+- Notes creation, New Session and Resume dialogs are modal, so scripted runs block on them.
+- Resume lists only the role's own working directory and cannot tell whether a conversation is
+  open in another terminal.
 
 ## Attribution and licensing
 

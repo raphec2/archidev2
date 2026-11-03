@@ -3,6 +3,8 @@
 
 #include "ExplorerPane.h"
 #include "ProjectConfig.h"
+#include "ResumeDialog.h"
+#include "SessionHistory.h"
 #include "Theme.h"
 
 #include <QAction>
@@ -10,8 +12,11 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEvent>
+#include <QFontMetrics>
 #include <QFile>
 #include <QFileInfo>
 #include <QFrame>
@@ -51,14 +56,40 @@ static const int kAiHistoryLines = 20000;           // QTermWidget default is 10
 // all, so a program drawing there keeps everything off-screen to itself and
 // no terminal-side selection can reach it. onDragPastEdge fires once per drag
 // so the window can say so instead of failing silently.
+//
+// QTermWidget's own edge scrolling is slow for long transcripts: a 100 ms
+// timer moving 1 + (lines beyond the edge) per tick, and the room above an
+// AI pane is only a few lines before the pointer leaves the window. While a
+// drag is held outside the pane this filter adds its own faster tick that
+// pushes the reported pointer further out the longer it stays there, so
+// QTermWidget's extendSelection scrolls further each time. The selection
+// logic itself stays QTermWidget's.
+//
+// The wheel scrolls the terminal's history while a drag is held, but
+// QTermWidget only extends a selection on mouse movement. After each wheel
+// step during a drag the filter replays the pointer position, so
+// "hold the button, wheel, release" selects across any number of screens.
 class TerminalSelectionFilter final : public QObject {
 public:
-    TerminalSelectionFilter(QWidget *display, std::function<void()> onDragPastEdge)
-        : QObject(display), m_onDragPastEdge(std::move(onDragPastEdge)) {}
+    struct Hooks {
+        std::function<void()> dragPastEdge;     // once per drag
+        std::function<void()> selectionDone;    // after each left release
+    };
+
+    TerminalSelectionFilter(QWidget *display, Hooks hooks)
+        : QObject(display), m_display(display), m_hooks(std::move(hooks)) {
+        m_edgeTimer.setInterval(40);
+        connect(&m_edgeTimer, &QTimer::timeout, this, [this] { edgeTick(); });
+    }
 
 protected:
     bool eventFilter(QObject *target, QEvent *event) override {
-        if (m_forwarding) return false;
+        if (m_forwarding || target != m_display) return false;
+        if (event->type() == QEvent::Wheel) {
+            // Let QTermWidget scroll first, then re-extend to the pointer.
+            if (m_dragging) QTimer::singleShot(0, this, [this] { replayPointer(0); });
+            return false;
+        }
         switch (event->type()) {
         case QEvent::MouseButtonPress:
         case QEvent::MouseButtonRelease:
@@ -71,26 +102,75 @@ protected:
         auto *mouse = static_cast<QMouseEvent *>(event);
         if (mouse->button() != Qt::LeftButton && !(mouse->buttons() & Qt::LeftButton))
             return false;
-        if (event->type() == QEvent::MouseButtonPress) {
+
+        const bool outside = mouse->pos().y() < 0 || mouse->pos().y() >= m_display->height();
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonDblClick:
+            m_dragging = true;
             m_edgeReported = false;
-        } else if (event->type() == QEvent::MouseMove && !m_edgeReported) {
-            const int y = mouse->pos().y();
-            if (y < 0 || y >= static_cast<QWidget *>(target)->height()) {
+            m_edgeTimer.stop();
+            break;
+        case QEvent::MouseMove:
+            if (!m_dragging) break;     // e.g. QTermWidget's own timer after release
+            if (outside && !m_edgeReported) {
                 m_edgeReported = true;
-                if (m_onDragPastEdge) m_onDragPastEdge();
+                if (m_hooks.dragPastEdge) m_hooks.dragPastEdge();
             }
+            if (outside && !m_edgeTimer.isActive()) { m_outsideFor.start(); m_edgeTimer.start(); }
+            else if (!outside) m_edgeTimer.stop();
+            break;
+        default:
+            break;
         }
+
         QMouseEvent selectionEvent(mouse->type(), mouse->localPos(), mouse->windowPos(),
                                    mouse->screenPos(), mouse->button(), mouse->buttons(),
                                    mouse->modifiers() | Qt::ShiftModifier, mouse->source());
-        QScopedValueRollback<bool> forwarding(m_forwarding, true);
-        QCoreApplication::sendEvent(target, &selectionEvent);
+        {
+            QScopedValueRollback<bool> forwarding(m_forwarding, true);
+            QCoreApplication::sendEvent(m_display, &selectionEvent);
+        }
+        if (event->type() == QEvent::MouseButtonRelease) {
+            m_dragging = false;
+            m_edgeTimer.stop();
+            if (m_hooks.selectionDone) m_hooks.selectionDone();
+        }
         return true;
     }
 
 private:
-    std::function<void()> m_onDragPastEdge;
+    // A held-button move at the current pointer, pushed `extraPx` further out.
+    void replayPointer(int extraPx) {
+        if (!m_dragging || !(QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+            m_dragging = false;
+            m_edgeTimer.stop();
+            return;
+        }
+        QPoint local = m_display->mapFromGlobal(QCursor::pos());
+        if (local.y() < 0) local.ry() -= extraPx;
+        else if (local.y() >= m_display->height()) local.ry() += extraPx;
+        QMouseEvent move(QEvent::MouseMove, local, m_display->mapToGlobal(local),
+                         Qt::NoButton, Qt::LeftButton, Qt::ShiftModifier);
+        QScopedValueRollback<bool> forwarding(m_forwarding, true);
+        QCoreApplication::sendEvent(m_display, &move);
+    }
+
+    void edgeTick() {
+        const QPoint local = m_display->mapFromGlobal(QCursor::pos());
+        if (local.y() >= 0 && local.y() < m_display->height()) { m_edgeTimer.stop(); return; }
+        // +1 line per tick for every quarter second outside, capped: about
+        // 25 lines/s at first, several hundred lines/s after a few seconds.
+        const int boost = qMin<qint64>(24, m_outsideFor.elapsed() / 250);
+        replayPointer(boost * QFontMetrics(m_display->font()).height());
+    }
+
+    QWidget *m_display;
+    Hooks m_hooks;
+    QTimer m_edgeTimer;
+    QElapsedTimer m_outsideFor;
     bool m_forwarding = false;
+    bool m_dragging = false;
     bool m_edgeReported = false;
 };
 
@@ -263,13 +343,22 @@ QComboBox *MainWindow::addRoleControls(QHBoxLayout *bar, Term &t, Surface which,
                                        : QStringLiteral("%1  (not installed)").arg(p.name), p.name);
     t.pending = new QLabel;
     t.pending->setStyleSheet(QStringLiteral("color:%1; font-weight:bold;").arg(QLatin1String(Theme::Amber)));
-    auto *btn = new QPushButton(QStringLiteral("Restart"));
+    auto *btn = new QPushButton(QStringLiteral("New Session"));
     btn->setFocusPolicy(Qt::NoFocus);
+    btn->setToolTip(QStringLiteral("End the %1 session and start a NEW conversation with the "
+                                   "profile selected on the left. Asks first.").arg(kName[which]));
     connect(btn, &QPushButton::clicked, this, [this, &t, which] { restartAi(t, which); });
+    auto *resume = new QPushButton(QStringLiteral("Resume…"));
+    resume->setFocusPolicy(Qt::NoFocus);
+    resume->setToolTip(QStringLiteral("Pick a previous Codex or Claude conversation from that CLI's "
+                                      "own history for %1 and continue it here.\n"
+                                      "Nothing is preselected and nothing is submitted.").arg(t.cwd));
+    connect(resume, &QPushButton::clicked, this, [this, &t, which] { resumeAi(t, which); });
     connect(t.combo, &QComboBox::currentTextChanged, this, [this, &t] { refreshPending(t); });
     bar->addWidget(new QLabel(QStringLiteral("%1:").arg(label)));
     bar->addWidget(t.combo);
     bar->addWidget(btn);
+    bar->addWidget(resume);
     bar->addWidget(t.pending);
     return t.combo;
 }
@@ -451,10 +540,10 @@ MainWindow::Term *MainWindow::termFor(Surface s) {
 void MainWindow::refreshPending(Term &t) {
     if (!t.pending) return;
     const bool differs = t.combo && t.combo->currentData().toString() != t.runningProfile;
-    t.pending->setText((differs || !t.term) ? QStringLiteral("Restart to apply") : QString());
+    t.pending->setText((differs || !t.term) ? QStringLiteral("Applies on New Session or Resume") : QString());
 }
 
-bool MainWindow::launchTerm(Term &t, Surface which, const AiProfile &p) {
+bool MainWindow::launchTerm(Term &t, Surface which, const AiProfile &p, const QString &resumedId) {
     if (p.name.isEmpty()) { say(QStringLiteral("%1: no profile available").arg(kName[which]), "error"); return false; }
     if (!p.available()) {          // validate BEFORE disturbing a working session
         say(QStringLiteral("%1: executable not found for \"%2\" (%3) - session unchanged")
@@ -469,13 +558,25 @@ bool MainWindow::launchTerm(Term &t, Surface which, const AiProfile &p) {
             if (qstrcmp(child->metaObject()->className(), "Konsole::TerminalDisplay") == 0) {
                 // historyLinesCount() reports the screen being shown; the
                 // alternate screen always reports 0.
-                child->installEventFilter(new TerminalSelectionFilter(child, [this, &t, which] {
+                TerminalSelectionFilter::Hooks hooks;
+                hooks.dragPastEdge = [this, &t, which] {
                     if (!t.term || t.term->historyLinesCount() > 0) return;
                     say(QStringLiteral("%1 has no terminal scrollback, so the selection cannot extend "
                                        "past the pane. Programs on the alternate screen keep their "
                                        "history to themselves; for Codex add --no-alt-screen to "
                                        "the profile arguments.").arg(kName[which]), "warn");
-                }));
+                };
+                // Confirms the size of what was just selected, which is otherwise
+                // invisible once it extends beyond the pane.
+                hooks.selectionDone = [this, &t, which] {
+                    if (!t.term) return;
+                    const QString sel = t.term->selectedText(true);
+                    if (sel.isEmpty()) return;
+                    const int lines = sel.count(QLatin1Char('\n')) + 1;
+                    say(QStringLiteral("%1: %2 line(s), %3 chars selected - Ctrl+Shift+C copies, "
+                                       "the buttons above route it").arg(kName[which]).arg(lines).arg(sel.size()));
+                };
+                child->installEventFilter(new TerminalSelectionFilter(child, std::move(hooks)));
                 break;
             }
         }
@@ -493,7 +594,18 @@ bool MainWindow::launchTerm(Term &t, Surface which, const AiProfile &p) {
     t.term->startShellProgram();
     t.slot->addWidget(t.term);
     t.runningProfile = p.name;
-    t.header->setText(QStringLiteral("%1   %2 @ %3").arg(t.title, p.name, t.cwd));
+    // The dropdown is what New Session and Resume act on, so it must start out
+    // naming the profile that is actually running.
+    if (t.combo) {
+        const int i = t.combo->findData(p.name);
+        if (i >= 0) t.combo->setCurrentIndex(i);
+    }
+    if (which == SShell)
+        t.header->setText(QStringLiteral("%1   %2 @ %3").arg(t.title, p.name, t.cwd));
+    else
+        t.header->setText(QStringLiteral("%1   %2 · %3 @ %4").arg(t.title, p.name,
+            resumedId.isEmpty() ? QStringLiteral("new session")
+                                : QStringLiteral("resumed %1").arg(resumedId), t.cwd));
     connect(t.term, &QTermWidget::termGetFocus, this, [this, which] { markFocus(which); });
     installClipboardShortcuts(t, which);
     refreshPending(t);
@@ -557,17 +669,56 @@ void MainWindow::restartAi(Term &t, Surface which) {
                 .arg(kName[which], p.name, p.program), "error");
         return;
     }
-    if (t.term && QMessageBox::question(this, QStringLiteral("Restart %1").arg(kName[which]),
-            QStringLiteral("End the current %1 session and start \"%2\" in\n%3 ?")
+    if (t.term && QMessageBox::question(this, QStringLiteral("New %1 session").arg(kName[which]),
+            QStringLiteral("End the current %1 session and start a NEW \"%2\" conversation in\n%3 ?\n\n"
+                           "To continue an earlier conversation instead, cancel and use Resume…")
                 .arg(kName[which], p.name, t.cwd),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
-        say(QStringLiteral("%1 restart cancelled - session untouched").arg(kName[which]));
+        say(QStringLiteral("%1 new session cancelled - session untouched").arg(kName[which]));
         return;
     }
     if (launchTerm(t, which, p)) {
         m_cfg.set(which == SConsultant ? QStringLiteral("roles/consultant_profile")
                                        : QStringLiteral("roles/developer_profile"), p.name);
-        say(QStringLiteral("%1 restarted with \"%2\" in %3").arg(kName[which], p.name, t.cwd));
+        say(QStringLiteral("%1 started a new \"%2\" session in %3").arg(kName[which], p.name, t.cwd));
+    }
+}
+
+// Resume uses the CLI's own history and its own resume option; ArchiDev2
+// records nothing. The dialog requires an explicit pick, and the chosen ID is
+// passed as one argv entry, never through a shell and never as prompt text.
+void MainWindow::resumeAi(Term &t, Surface which) {
+    const AiProfile p = profileByName(t.combo->currentData().toString());
+    if (!p.available()) {
+        say(QStringLiteral("%1: cannot resume with \"%2\" - %3 not found. Existing session left running.")
+                .arg(kName[which], p.name, p.program), "error");
+        return;
+    }
+    const HistoryKind kind = historyKindFor(p);
+    if (kind == HistoryKind::None) {
+        say(QStringLiteral("%1: Resume works for profiles whose program is codex or claude; \"%2\" runs %3")
+                .arg(kName[which], p.name, p.program), "warn");
+        return;
+    }
+    ResumeDialog dlg(QLatin1String(kName[which]), p, kind, t.cwd, this);
+    connect(&dlg, &ResumeDialog::message, this, [this](const QString &m) { say(m); });
+    if (dlg.exec() != QDialog::Accepted) {
+        say(QStringLiteral("%1 resume cancelled - session untouched").arg(kName[which]));
+        return;
+    }
+    const SavedSession s = dlg.chosen();
+    AiProfile r = p;
+    r.arguments = resumeArguments(kind, s.id, p.arguments);
+    if (r.arguments.isEmpty()) {
+        say(QStringLiteral("%1: \"%2\" is not a session ID - session untouched").arg(kName[which], s.id), "error");
+        return;
+    }
+    if (launchTerm(t, which, r, s.id)) {
+        m_cfg.set(which == SConsultant ? QStringLiteral("roles/consultant_profile")
+                                       : QStringLiteral("roles/developer_profile"), p.name);
+        say(QStringLiteral("%1 resumed %2 conversation \"%3\" (%4) - nothing submitted")
+                .arg(kName[which], historyKindName(kind),
+                     s.title.isEmpty() ? s.firstPrompt : s.title, s.id));
     }
 }
 
@@ -615,6 +766,17 @@ void MainWindow::routeFrom(Surface source, Surface dest) {
         if (text.isEmpty()) { say(QStringLiteral("Selection is only line breaks"), "warn"); return; }
         Term *t = termFor(dest);
         if (!t || !t->term) { say(QStringLiteral("%1 has no running session").arg(kName[dest]), "error"); return; }
+        // A selection dragged across many screens is easy to make by accident.
+        const int bytes = text.toUtf8().size();
+        if (bytes > kConfirmSendBytes
+            && QMessageBox::question(this, QStringLiteral("Send large selection"),
+                   QStringLiteral("Insert %1 lines (%2 bytes) from %3 into the %4 prompt?\n"
+                                  "It will not be submitted.")
+                       .arg(text.count(QLatin1Char('\n')) + 1).arg(bytes).arg(kName[source], kName[dest]),
+                   QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+            say(QStringLiteral("Send cancelled"));
+            return;
+        }
         const int visible = text.size();       // count before bracketing adds marker bytes
         t->term->bracketText(text);   // wraps in \e[200~..\e[201~ only if the app enabled it
         t->term->sendText(text);      // exactly these bytes; no Enter is ever appended

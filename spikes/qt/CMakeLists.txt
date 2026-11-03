@@ -38,6 +38,8 @@ add_executable(archidev2-qt
     Profiles.cpp
     ExplorerPane.cpp
     Theme.cpp
+    SessionHistory.cpp
+    ResumeDialog.cpp
 )
 target_link_libraries(archidev2-qt PRIVATE Qt5::Widgets qtermwidget5)
 target_compile_options(archidev2-qt PRIVATE -Wall -Wextra -Wpedantic)

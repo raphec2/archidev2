@@ -72,8 +72,10 @@ private:
     void saveLayout();
 
     // --- terminals
-    bool launchTerm(Term &t, Surface which, const AiProfile &p);
+    // resumedId only labels the pane header; the resume itself is in p.arguments.
+    bool launchTerm(Term &t, Surface which, const AiProfile &p, const QString &resumedId = QString());
     void restartAi(Term &t, Surface which);
+    void resumeAi(Term &t, Surface which);
     void restartShell();
     AiProfile profileByName(const QString &n) const;
     AiProfile shellProfile() const;
