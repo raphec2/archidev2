@@ -53,36 +53,68 @@ starting a New Session or Resume with it *is* saved, because that is a deliberat
 
 ### Shortcut command and desktop launcher (optional)
 
-`spikes/qt/install-launcher` adds a short terminal command and a menu entry for one project
-that already has its `.archidev2.ini`. It writes only under your home directory, so no
-machine-specific path enters the repository:
+`spikes/qt/archidev2-launch` opens any project, detached from the terminal. You can run it from
+the checkout. `spikes/qt/install-launcher` installs a copy as a short command, adds a menu entry,
+and can add a desktop icon. The copy has two values filled in: this checkout's app, and your
+usual project, if you give one.
+
+Everything machine-specific goes into files under your home directory. Nothing is added to the
+repository, and there is no project list.
 
 ```sh
-spikes/qt/install-launcher --desktop-icon /path/to/project   # command "ad2" + menu entry + desktop icon
-spikes/qt/install-launcher --name myproj /path/to/other      # another project, another command
-spikes/qt/install-launcher --uninstall [--name myproj]       # removes only files it generated
+spikes/qt/install-launcher --desktop-icon /path/to/usual/project  # "ad2" + menu entry + desktop icon
+spikes/qt/install-launcher --uninstall                            # removes only files it generated
 ```
+
+| Action | What opens |
+|---|---|
+| `ad2` | the usual project, or the folder picker if no usual project was given |
+| `ad2 /path/to/project` | that project; extra app options pass through, e.g. `ad2 --developer-profile Codex ~/src/x` |
+| `ad2 --choose`, the **ArchiDev2** menu entry, the desktop icon | a folder picker (zenity) |
+| Menu entry → right-click → **Open <usual> directly** | the usual project, with no picker |
+
+**Using the picker**
+- It opens in the usual project's parent folder, with the usual project highlighted.
+- To open the usual project, click **OK**, or press **Enter** twice (the first Enter goes into
+  the folder).
+- To open another project, pick its folder or type a path with **Ctrl+L**.
+- **Cancel** or **Escape** opens nothing.
+
+**A folder without `.archidev2.ini`** goes through the app's normal first-run setup. Nothing
+opens a different project instead.
+- **From a terminal:** you're asked for the Consultant directory (Tab completes the path). A
+  path that isn't a folder is asked again, and an empty answer cancels.
+- **From the picker:**
+  1. A dialog names the INI that will be created; **Cancel** is the default.
+  2. **Set Up…** then asks for the Consultant directory in a second picker.
+- **Either way,** the launcher then runs the app with `--consultant-dir`, and the app writes the
+  project's INI. Cancelling creates nothing.
+
+**If the app stops while starting**, for example because the INI points at a missing
+Consultant directory, the launcher shows the app's message and exit code. From the menu, this
+appears in a dialog instead of disappearing.
+
+The launcher watches the app for its first 1.5 seconds. It runs the app in its own session
+(`setsid`), so closing the terminal does not close ArchiDev2.
 
 | File | Purpose |
 |---|---|
-| `~/.local/bin/<name>` (default `ad2`) | opens the project with this checkout's `build/qt-spike/archidev2-qt`; extra options pass through, e.g. `ad2 --developer-profile Codex` |
-| `~/.local/share/applications/archidev2-<name>.desktop` | menu entry "ArchiDev2 (<project folder>)"; right-click it → *Add to panel* for a one-click button |
-| `<Desktop>/archidev2-<name>.desktop` | with `--desktop-icon`; marked trusted so Cinnamon/GNOME will run it |
+| `~/.local/bin/<name>` (default `ad2`, `--name` to change) | copy of `archidev2-launch` with the app path and usual project filled in |
+| `~/.local/share/applications/archidev2-<name>.desktop` | menu entry "ArchiDev2"; right-click → *Add to panel* for a one-click button |
+| `<Desktop>/archidev2-<name>.desktop` | with `--desktop-icon`; marked trusted so Cinnamon will run it |
 
-Behaviour:
+Also:
 - **Every launch opens a new window.** Windows you already have open are not affected.
-- **The command returns immediately** (`setsid -f`), so closing the terminal does not close
-  ArchiDev2.
-- **Settings come only from the project's INI.** The launcher passes no settings of its own.
-- **It refuses to overwrite** an existing command that it did not generate.
-- **nvm:** desktop sessions don't read `~/.bashrc`, so CLIs installed with nvm (Codex here)
-  would be missing from PATH, or an older system `node` would win. When nvm is not already
-  loaded, the command loads nvm's default Node first, as an interactive terminal would.
-
-  Verified 2026-11-03 under Cinnamon: before this, a menu launch started the Consultant with
-  "executable not found for Codex".
-- **The launcher does not build anything.** Rebuild after pulling changes; a running window keeps
-  the code it was started with until you close and reopen it.
+- **Settings come only from the project's own INI.** The installer refuses a usual project
+  that has no INI, and refuses to overwrite a command it did not generate.
+- **nvm:** desktop sessions don't read `~/.bashrc`. CLIs installed with nvm (Codex here) would
+  then be missing, or an older system `node` would win. So when nvm isn't loaded yet, the
+  launcher loads nvm's default Node first.
+- **Dialogs need `zenity`.** It's installed with Cinnamon; otherwise `sudo apt install zenity`.
+- **The launcher does not build anything.** Rebuild after pulling changes. A running window
+  keeps the code it started with until you reopen it.
+- **Installer changes need a re-run.** After changing `archidev2-launch`, re-run
+  `install-launcher` so the installed copy matches.
 
 ### One packaging workaround
 
@@ -167,8 +199,8 @@ archidev2 /path/to/project
 ```
 
 If `.archidev2.ini` is absent, ArchiDev2 creates it, then resolves the consultant directory from
-`--consultant-dir`, or by prompting on the terminal when stdin is a TTY. There is **no desktop
-directory chooser** — this is a CLI product. Non-interactive with no consultant directory, it
+`--consultant-dir`, or by prompting on the terminal when stdin is a TTY. The app has **no desktop
+directory chooser** of its own; the optional launcher above provides the dialogs. Non-interactive with no consultant directory, it
 writes the template, prints the exact command to run, and exits 3:
 
 ```
