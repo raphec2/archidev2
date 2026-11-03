@@ -51,6 +51,39 @@ Options (`--help` for the full list):
 CLI role/profile values apply to the current launch only. Choosing a profile in the UI and
 starting a New Session or Resume with it *is* saved, because that is a deliberate workspace choice.
 
+### Shortcut command and desktop launcher (optional)
+
+`spikes/qt/install-launcher` adds a short terminal command and a menu entry for one project
+that already has its `.archidev2.ini`. It writes only under your home directory, so no
+machine-specific path enters the repository:
+
+```sh
+spikes/qt/install-launcher --desktop-icon /path/to/project   # command "ad2" + menu entry + desktop icon
+spikes/qt/install-launcher --name myproj /path/to/other      # another project, another command
+spikes/qt/install-launcher --uninstall [--name myproj]       # removes only files it generated
+```
+
+| File | Purpose |
+|---|---|
+| `~/.local/bin/<name>` (default `ad2`) | opens the project with this checkout's `build/qt-spike/archidev2-qt`; extra options pass through, e.g. `ad2 --developer-profile Codex` |
+| `~/.local/share/applications/archidev2-<name>.desktop` | menu entry "ArchiDev2 (<project folder>)"; right-click it → *Add to panel* for a one-click button |
+| `<Desktop>/archidev2-<name>.desktop` | with `--desktop-icon`; marked trusted so Cinnamon/GNOME will run it |
+
+Behaviour:
+- **Every launch opens a new window.** Windows you already have open are not affected.
+- **The command returns immediately** (`setsid -f`), so closing the terminal does not close
+  ArchiDev2.
+- **Settings come only from the project's INI.** The launcher passes no settings of its own.
+- **It refuses to overwrite** an existing command that it did not generate.
+- **nvm:** desktop sessions don't read `~/.bashrc`, so CLIs installed with nvm (Codex here)
+  would be missing from PATH, or an older system `node` would win. When nvm is not already
+  loaded, the command loads nvm's default Node first, as an interactive terminal would.
+
+  Verified 2026-11-03 under Cinnamon: before this, a menu launch started the Consultant with
+  "executable not found for Codex".
+- **The launcher does not build anything.** Rebuild after pulling changes; a running window keeps
+  the code it was started with until you close and reopen it.
+
 ### One packaging workaround
 
 Ubuntu's `qtermwidget5` metadata is broken twice: its `.pc` requires a `libutf8proc.pc` the
