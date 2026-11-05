@@ -1,4 +1,12 @@
-# ArchiDev2 (prototype)
+# ArchiDev2
+
+**Looking for the current native Qt app?** It lives on the [`qt-native-spike` branch](https://github.com/raphec2/archidev2/tree/qt-native-spike). Start with its [front page](https://github.com/raphec2/archidev2/blob/qt-native-spike/README.md) and [build and usage guide](https://github.com/raphec2/archidev2/blob/qt-native-spike/spikes/qt/README.md). The Qt prototype puts a Consultant AI, Developer AI, project shell, two file explorers and Notes in one Linux window. Select text in one pane, click a destination, and it is inserted without being submitted.
+
+The Qt version currently builds from source on Ubuntu. It has its own project-local settings and optional desktop launcher. **The code and instructions below are for the earlier WezTerm version on `main`.**
+
+---
+
+# Earlier WezTerm prototype
 
 A deliberately small workspace for using one AI CLI as a **consultant** and another as a
 **developer**, side by side, with easy text routing between them.
