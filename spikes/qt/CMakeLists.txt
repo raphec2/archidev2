@@ -5,6 +5,7 @@ project(archidev2-qt LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets)
 
@@ -40,6 +41,7 @@ add_executable(archidev2-qt
     Theme.cpp
     SessionHistory.cpp
     ResumeDialog.cpp
+    archidev2.qrc
 )
 target_link_libraries(archidev2-qt PRIVATE Qt5::Widgets qtermwidget5)
 target_compile_options(archidev2-qt PRIVATE -Wall -Wextra -Wpedantic)

@@ -56,7 +56,9 @@ starting a New Session or Resume with it *is* saved, because that is a deliberat
 `spikes/qt/archidev2-launch` opens any project, detached from the terminal. You can run it from
 the checkout. `spikes/qt/install-launcher` installs a copy as a short command, adds a menu entry,
 and can add a desktop icon. The copy has two values filled in: this checkout's app, and your
-usual project, if you give one.
+usual project, if you give one. The menu entry and Qt window use the bundled
+`archidev2.svg` icon, so the app has its own identity in the taskbar. Re-run the installer after
+updating the checkout to refresh an existing menu or desktop entry.
 
 Everything machine-specific goes into files under your home directory. Nothing is added to the
 repository, and there is no project list.

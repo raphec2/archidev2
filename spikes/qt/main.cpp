@@ -11,6 +11,7 @@
 #include <QCommandLineParser>
 #include <QDir>
 #include <QFileInfo>
+#include <QIcon>
 #include <QTextStream>
 #include <unistd.h>
 
@@ -26,6 +27,7 @@ static bool resolveDir(const QString &raw, QString *out, QString *err) {
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
+    app.setWindowIcon(QIcon(QStringLiteral(":/archidev2.svg")));
     QTextStream err(stderr), in(stdin);
 
     QCommandLineParser parser;
