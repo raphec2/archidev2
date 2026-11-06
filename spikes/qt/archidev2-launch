@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# archidev2-launch - open a project in the native Qt ArchiDev2, detached.
+#
+#   archidev2-launch                 the usual project (or the folder picker if none is set)
+#   archidev2-launch PROJECT_DIR     that project
+#   archidev2-launch --choose        pick the project folder in a dialog (desktop/menu launcher)
+#   archidev2-launch [APP OPTIONS] … app options such as --developer-profile pass through
+#
+# A project without .archidev2.ini goes through ArchiDev2's own first-run setup:
+# you confirm, choose the Consultant directory, and the app writes the INI with
+# --consultant-dir. Nothing is ever opened in a different project instead.
+#
+# install-launcher copies this file to ~/.local/bin/<name> and sets the two
+# values below. Run from the checkout, they are left empty and found here.
+AD2_APP=${AD2_APP:-}
+AD2_DEFAULT_PROJECT=${AD2_DEFAULT_PROJECT:-}
+### end of install-launcher settings
+set -u
+
+title=ArchiDev2
+if [ -z "$AD2_APP" ]; then
+  AD2_APP=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)/build/qt-spike/archidev2-qt
+fi
+
+# With a terminal, talk on it; without one (desktop/menu launch), use dialogs.
+if [ -t 0 ] && [ -t 2 ]; then gui=0; else gui=1; fi
+
+have_zenity() { command -v zenity >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; }
+fail() {  # message [details]
+  if ((gui)) && have_zenity; then
+    zenity --error --title="$title" --no-markup --width=560 --text="$1${2:+
+
+$2}" 2>/dev/null
+  else
+    printf 'ArchiDev2: %s\n' "$1" >&2
+    [ -n "${2:-}" ] && printf '%s\n' "$2" >&2
+  fi
+  exit "${3:-1}"
+}
+pick_dir() {  # title start -> chosen folder on stdout; non-zero on cancel
+  have_zenity || fail "A folder picker needs zenity (sudo apt install zenity)."
+  zenity --file-selection --directory --title="$1" --filename="$2" 2>/dev/null
+}
+
+choose=0 project= passthru=()
+while (($#)); do
+  case $1 in
+    --choose) choose=1; shift ;;
+    -h|--help) sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --) shift; break ;;
+    # App options that take a value; keep the value with its option.
+    --consultant-dir|--consultant-profile|--developer-profile|--shell)
+      (($# >= 2)) || fail "$1 needs a value" "" 2
+      passthru+=("$1" "$2"); shift 2 ;;
+    -*) passthru+=("$1"); shift ;;
+    *) [ -z "$project" ] || fail "Give at most one project folder." "" 2
+       project=$1; shift ;;
+  esac
+done
+if (($#)); then
+  [ -z "$project" ] && (($# == 1)) || fail "Give at most one project folder." "" 2
+  project=$1
+fi
+
+if ((choose)) || [ -z "$project$AD2_DEFAULT_PROJECT" ]; then
+  [ -n "$project" ] && fail "Use either --choose or a project folder, not both." "" 2
+  start=${AD2_DEFAULT_PROJECT:-$HOME/}
+  project=$(pick_dir "Open a project in ArchiDev2" "$start") || exit 0   # cancelled
+elif [ -z "$project" ]; then
+  project=$AD2_DEFAULT_PROJECT
+fi
+
+[ -d "$project" ] || fail "Not a folder: $project" "" 2
+project=$(cd -P -- "$project" && pwd -P) || fail "Cannot open folder: $project" "" 2
+[ -x "$AD2_APP" ] || fail "ArchiDev2 is not built: $AD2_APP" \
+  "Build it with: cmake --build build/qt-spike --parallel" 1
+
+# --- first-run setup --------------------------------------------------------
+has_cdir=0
+for a in "${passthru[@]}"; do [ "$a" = --consultant-dir ] && has_cdir=1; done
+if [ ! -f "$project/.archidev2.ini" ] && ((!has_cdir)); then
+  case $project in "$HOME"|/) warn="Note: this is $( [ "$project" = / ] && echo the root folder || echo your home folder ). Most projects are a subfolder.
+" ;; *) warn= ;; esac
+  if ((gui)); then
+    have_zenity || fail "$project has no .archidev2.ini." \
+      "Run in a terminal:  archidev2-qt --consultant-dir /path/to/consulting $project"
+    zenity --question --title="$title - new project" --no-markup --width=560 --default-cancel \
+      --ok-label="Set Up…" --cancel-label=Cancel --text="$project has no ArchiDev2 settings yet.
+
+${warn}Set it up as an ArchiDev2 project? This creates $project/.archidev2.ini.
+Next, choose the Consultant directory: the folder where the Consultant AI starts." 2>/dev/null || exit 0
+    cdir=$(pick_dir "Consultant directory for $(basename -- "$project")" "$project/") || exit 0
+  else
+    printf '%s has no .archidev2.ini.\n%sArchiDev2 will create it there (first-run setup).\n' "$project" "$warn" >&2
+    while :; do
+      read -r -e -p "Consultant directory (where the Consultant AI starts; Tab completes; empty cancels): " cdir || exit 0
+      [ -z "$cdir" ] && { echo "Cancelled; nothing was created." >&2; exit 0; }
+      cdir=${cdir/#\~/$HOME}
+      [ -d "$cdir" ] && break
+      echo "Not a folder: $cdir" >&2
+    done
+  fi
+  passthru+=(--consultant-dir "$cdir")
+fi
+
+# --- tool PATH ---------------------------------------------------------------
+# Desktop sessions do not read ~/.bashrc, so CLIs installed with nvm (for
+# example codex) would be missing, or a system node would win. Load nvm's
+# default node, as an interactive terminal would.
+if [ -z "${NVM_BIN:-}" ]; then
+  export NVM_DIR=${NVM_DIR:-$HOME/.nvm}
+  # shellcheck disable=SC1091
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+fi
+
+# --- launch -------------------------------------------------------------------
+# setsid puts the app in its own session, so closing the terminal does not
+# close it. stdin is /dev/null: all questions were asked above. Watch it for a
+# moment so a startup error is shown instead of vanishing.
+cd "$project" || exit 1
+if ((gui)); then
+  log=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/archidev2-launch.XXXXXX")
+  setsid "$AD2_APP" "${passthru[@]}" "$project" </dev/null >"$log" 2>&1 &
+else
+  setsid "$AD2_APP" "${passthru[@]}" "$project" </dev/null &
+fi
+pid=$!
+for _ in $(seq 15); do
+  state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null) || state=gone
+  case $state in Z|X|gone) break ;; esac
+  sleep 0.1
+done
+case $state in
+  Z|X|gone)
+    wait "$pid"; rc=$?
+    if ((gui)); then out=$(tail -n 20 "$log"); rm -f -- "$log"; else out=; fi
+    fail "ArchiDev2 stopped while starting $project (exit $rc)." "$out" "$rc" ;;
+esac
+if ((gui)); then rm -f -- "$log"; else echo "ArchiDev2 started for $project (pid $pid)" >&2; fi
+exit 0
