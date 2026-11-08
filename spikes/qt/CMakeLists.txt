@@ -38,6 +38,8 @@ add_executable(archidev2-qt
     ProjectConfig.cpp
     Profiles.cpp
     ExplorerPane.cpp
+    CodeEditor.cpp
+    EditorTabs.cpp
     Theme.cpp
     SessionHistory.cpp
     ResumeDialog.cpp

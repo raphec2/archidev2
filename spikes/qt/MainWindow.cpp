@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "MainWindow.h"
 
+#include "CodeEditor.h"
+#include "EditorTabs.h"
 #include "ExplorerPane.h"
 #include "ProjectConfig.h"
 #include "ResumeDialog.h"
@@ -23,23 +25,25 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QScopedValueRollback>
 #include <QSplitter>
 #include <QStyle>
 #include <QTextStream>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <signal.h>
 #include <qtermwidget.h>
 
 static const char *kName[]  = {"CONSULTANT", "DEVELOPER", "PROJECT SHELL", "NOTES"};
 static const char *kShort[] = {"Consultant", "Developer", "Shell", "Notes"};
-static const qint64 kMaxOpenBytes     = 8 * 1024 * 1024;  // editor open limit
 static const qint64 kMaxSendBytes     = 256 * 1024;       // hard limit for file -> terminal
 static const qint64 kConfirmSendBytes = 16 * 1024;        // ask above this
 
@@ -222,6 +226,10 @@ MainWindow::MainWindow(Launch launch, ProjectConfig &cfg, QWidget *parent)
     launchTerm(m_developer,  SDeveloper,  profileByName(m_l.developerProfile));
     launchTerm(m_shell,      SShell,      shellProfile());
 
+    // Notes is the pinned first tab. A configured notes file that exists is
+    // loaded into it straight away; otherwise it starts as a scratch buffer.
+    const QString notes = notesFilePath();
+    if (!notes.isEmpty() && QFileInfo::exists(notes)) m_editor->loadNotesFile(notes);
     refreshDoc();
 
     // Spike-only: prove there is no global selection fallback. NOTES holds a
@@ -230,8 +238,8 @@ MainWindow::MainWindow(Launch launch, ProjectConfig &cfg, QWidget *parent)
     if (qEnvironmentVariableIsSet("ARCHIDEV2_SELFTEST_SIMUL")) {
         QTimer::singleShot(2500, this, [this] {
             QTextStream o(stderr);
-            m_editor->setPlainText(QStringLiteral("NOTESTEXT-BBB"));
-            m_editor->selectAll();
+            m_editor->notesEditor()->setPlainText(QStringLiteral("NOTESTEXT-BBB"));
+            m_editor->notesEditor()->selectAll();
             int enabled = 0, total = 0;
             for (QPushButton *b : findChildren<QPushButton *>())
                 if (b->objectName() == QLatin1String("routeButton")) { ++total; if (b->isEnabled()) ++enabled; }
@@ -252,13 +260,13 @@ MainWindow::MainWindow(Launch launch, ProjectConfig &cfg, QWidget *parent)
     const QString st = qEnvironmentVariable("ARCHIDEV2_SELFTEST");
     if (!st.isEmpty()) {
         QTimer::singleShot(2500, this, [this, st] {
-            m_editor->setPlainText(QStringLiteral("touch /tmp/ad2-iter-EXECUTED\nsecond line\n"));
-            m_editor->selectAll();
+            m_editor->notesEditor()->setPlainText(QStringLiteral("touch /tmp/ad2-iter-EXECUTED\nsecond line\n"));
+            m_editor->notesEditor()->selectAll();
             routeFrom(SNotes, SDeveloper);
             routeFrom(SNotes, SShell);
             routeFrom(SNotes, SConsultant);
             openFile(st);
-            m_editor->appendPlainText(QStringLiteral("appended-by-selftest"));
+            if (CodeEditor *e = m_editor->activeEditor()) e->appendPlainText(QStringLiteral("appended-by-selftest"));
             saveDoc();
             QTimer::singleShot(600, this, [this] { close(); });
         });
@@ -287,6 +295,7 @@ QWidget *MainWindow::makePane(const QString &title, QWidget *inner, QLabel **hdr
     h->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     v->addWidget(h);
     auto *frame = new QFrame;
+    frame->setObjectName(QStringLiteral("paneFrame"));
     frame->setMinimumWidth(0);
     frame->setStyleSheet(Theme::paneBorder(false));
     auto *fv = new QVBoxLayout(frame);
@@ -323,10 +332,21 @@ QHBoxLayout *MainWindow::makeRouteBar(Surface source, const QVector<Surface> &de
             label = QStringLiteral("← Consultant");
         auto *b = new QPushButton(label);
         b->setObjectName(QStringLiteral("routeButton"));
+        b->setProperty("routeSource", int(source));
+        b->setProperty("routeDest", int(dest));
         b->setFocusPolicy(Qt::NoFocus);   // must not steal the source's selection
-        b->setToolTip(QStringLiteral("Send the text selected in %1 to %2.\n"
-                                     "Inserted without being submitted; focus moves to %2.")
-                          .arg(QLatin1String(kName[source]), QLatin1String(kName[dest])));
+        if (source == SNotes)
+            b->setToolTip(QStringLiteral("Send the text selected in the ACTIVE editor tab (Notes or a file) to %1.\n"
+                                         "%2")
+                              .arg(QLatin1String(kName[dest]),
+                                   dest == SNotes ? QStringLiteral("Inserted at the Notes cursor; the Notes tab is shown.")
+                                                  : QStringLiteral("Inserted without being submitted; focus moves there.")));
+        else
+            b->setToolTip(QStringLiteral("Send the text selected in %1 to %2.\n%3")
+                              .arg(QLatin1String(kName[source]), QLatin1String(kName[dest]),
+                                   dest == SNotes ? QStringLiteral("Always the pinned Notes tab, whatever tab is showing.")
+                                                  : QStringLiteral("Inserted without being submitted; focus moves to %1.")
+                                                        .arg(QLatin1String(kName[dest]))));
         connect(b, &QPushButton::clicked, this, [this, source, dest] { routeFrom(source, dest); });
         bar->addWidget(b);
     }
@@ -367,28 +387,68 @@ QWidget *MainWindow::buildConsultantArea() {
     // The AI controls and the Consultant routing buttons belong to the terminal,
     // not to the whole area: they live inside the terminal side of the split so
     // they never visually span Consultant Files.
-    m_consultantFiles = new ExplorerPane(m_l.consultantDir,
-        m_cfg.flag(QStringLiteral("explorers/consultant_allow_above_start"), true));
-    auto *sendBtn = new QPushButton(QStringLiteral("→ Consultant"));
-    auto *openBtn = new QPushButton(QStringLiteral("Open"));
-    sendBtn->setToolTip(QStringLiteral("Send File → Consultant: insert the selected text file "
-                                       "into the CONSULTANT prompt.\n"
-                                       "Never submitted; focus moves to CONSULTANT."));
-    openBtn->setToolTip(QStringLiteral("Open the selected file in NOTES / EDITOR."));
-    connect(sendBtn, &QPushButton::clicked, this, [this] { sendFileToConsultant(); });
-    connect(openBtn, &QPushButton::clicked, this, [this] {
-        const QString p = m_consultantFiles->selectedPath();
-        if (p.isEmpty()) { say(QStringLiteral("No file selected in Consultant Files"), "warn"); return; }
+    m_files = new ExplorerPane;
+    m_files->addRoot(QStringLiteral("consultant"), QStringLiteral("Consultant"), QStringLiteral("Cons."),
+                     m_l.consultantDir,
+                     m_cfg.flag(QStringLiteral("explorers/consultant_allow_above_start"), true));
+    m_files->addRoot(QStringLiteral("project"), QStringLiteral("Project"), QStringLiteral("Proj."),
+                     m_l.projectDir,
+                     m_cfg.flag(QStringLiteral("explorers/project_allow_above_start"), false));
+
+    auto *openBtn = new QToolButton;
+    openBtn->setText(QStringLiteral("Open"));
+    openBtn->setToolTip(QStringLiteral("Open in Editor: the selected file opens in its own editor tab "
+                                       "(double-click does the same). Notes is never replaced."));
+    connect(openBtn, &QToolButton::clicked, this, [this] {
+        const QString p = m_files->selectedPath();
+        if (p.isEmpty()) { say(QStringLiteral("No file selected in Files"), "warn"); return; }
+        if (QFileInfo(p).isDir()) { say(QStringLiteral("%1 is a folder - double-click expands it").arg(p), "warn"); return; }
         openFile(p);
     });
-    m_consultantFiles->addToolButton(sendBtn);
-    m_consultantFiles->addToolButton(openBtn);
-    connect(m_consultantFiles, &ExplorerPane::fileActivated, this, [this](const QString &p) { openFile(p); });
-    connect(m_consultantFiles, &ExplorerPane::message, this,
+
+    auto *sendBtn = new QToolButton;
+    sendBtn->setText(QStringLiteral("Send"));
+    sendBtn->setPopupMode(QToolButton::InstantPopup);
+    sendBtn->setToolTip(QStringLiteral("Send the selected file: its contents into an AI prompt, or its path "
+                                       "into the shell. Never submitted."));
+    auto *menu = new QMenu(sendBtn);
+    QAction *toCons = menu->addAction(QStringLiteral("Contents → Consultant prompt"));
+    QAction *toDev = menu->addAction(QStringLiteral("Contents → Developer prompt"));
+    QAction *toShell = menu->addAction(QStringLiteral("Path → Shell"));
+    menu->addSeparator();
+    QAction *copyPath = menu->addAction(QStringLiteral("Copy Path"));
+    connect(toCons, &QAction::triggered, this, [this] { sendFileContents(SConsultant); });
+    connect(toDev, &QAction::triggered, this, [this] { sendFileContents(SDeveloper); });
+    connect(toShell, &QAction::triggered, this, [this] { sendFilePathToShell(); });
+    connect(copyPath, &QAction::triggered, this, [this] {
+        const QString p = m_files->selectedPath();
+        if (p.isEmpty()) { say(QStringLiteral("No file selected in Files"), "warn"); return; }
+        QGuiApplication::clipboard()->setText(p);
+        say(QStringLiteral("Copied path %1 to the system clipboard").arg(p));
+    });
+    // Contents only make sense for a file; say why rather than failing later.
+    connect(menu, &QMenu::aboutToShow, this, [this, toCons, toDev, toShell, copyPath] {
+        const QString p = m_files->selectedPath();
+        const bool file = !p.isEmpty() && QFileInfo(p).isFile();
+        toCons->setEnabled(file);
+        toDev->setEnabled(file);
+        toShell->setEnabled(!p.isEmpty());
+        copyPath->setEnabled(!p.isEmpty());
+        if (p.isEmpty()) say(QStringLiteral("Select a file in Files first"), "warn");
+    });
+    sendBtn->setMenu(menu);
+    m_files->addActionWidget(openBtn);
+    m_files->addActionWidget(sendBtn);
+
+    connect(m_files, &ExplorerPane::fileActivated, this, [this](const QString &p) { openFile(p); });
+    connect(m_files, &ExplorerPane::message, this,
             [this](const QString &t, const QString &l) { say(t, l.toLatin1().constData()); });
-    m_consultantFilesHost = makePane(QStringLiteral("CONSULTANT FILES"), m_consultantFiles,
-                                     nullptr, nullptr, nullptr);
+    m_consultantFilesHost = makePane(QStringLiteral("FILES"), m_files, &m_filesHeader, nullptr, nullptr);
     m_consultantFilesHost->setMinimumWidth(0);
+    connect(m_files, &ExplorerPane::rootChanged, this, [this](int r) {
+        m_filesHeader->setText(QStringLiteral("FILES · %1").arg(m_files->rootLabel(r).toUpper()));
+    });
+    m_filesHeader->setText(QStringLiteral("FILES · %1").arg(m_files->rootLabel(m_files->activeRoot()).toUpper()));
 
     // Terminal side: its own controls, its own routing bar, then the terminal.
     auto *termSide = new QWidget;
@@ -419,9 +479,9 @@ QWidget *MainWindow::buildConsultantArea() {
         const bool show = !m_consultantFilesHost->isVisible();
         m_consultantFilesHost->setVisible(show);
         m_consultantCollapse->setText(show ? QStringLiteral("Hide Files") : QStringLiteral("Show Files"));
-        m_cfg.set(QStringLiteral("explorers/consultant_visible"),
+        m_cfg.set(QStringLiteral("explorers/visible"),
                   show ? QStringLiteral("true") : QStringLiteral("false"));
-        say(show ? QStringLiteral("Consultant Files shown") : QStringLiteral("Consultant Files hidden"));
+        say(show ? QStringLiteral("Files shown") : QStringLiteral("Files hidden"));
     });
 
     auto *box = new QWidget;
@@ -449,45 +509,25 @@ QWidget *MainWindow::buildDeveloperArea() {
 }
 
 QWidget *MainWindow::buildBottomRow() {
-    // 1. Project Files
-    m_projectFiles = new ExplorerPane(m_l.projectDir,
-        m_cfg.flag(QStringLiteral("explorers/project_allow_above_start"), false));
-    auto *openBtn = new QPushButton(QStringLiteral("Open"));
-    openBtn->setToolTip(QStringLiteral("Open the selected file in NOTES / EDITOR."));
-    connect(openBtn, &QPushButton::clicked, this, [this] {
-        const QString p = m_projectFiles->selectedPath();
-        if (p.isEmpty()) { say(QStringLiteral("No file selected in Project Files"), "warn"); return; }
-        openFile(p);
-    });
-    m_projectFiles->addToolButton(openBtn);
-    connect(m_projectFiles, &ExplorerPane::fileActivated, this, [this](const QString &p) { openFile(p); });
-    connect(m_projectFiles, &ExplorerPane::message, this,
-            [this](const QString &t, const QString &l) { say(t, l.toLatin1().constData()); });
-    auto *projectPane = makePane(QStringLiteral("PROJECT FILES"), m_projectFiles, nullptr, nullptr, nullptr);
-    projectPane->setMinimumWidth(0);
-
-    // 2. Notes / Editor
+    // 1. Notes + Editor tabs. The Project Files explorer that used to sit to
+    // the left is gone; the Files explorer beside Consultant switches roots.
     auto *notesBox = new QWidget;
     auto *nv = new QVBoxLayout(notesBox);
     nv->setContentsMargins(0, 0, 0, 0);
     nv->setSpacing(3);
-    auto *notesBar = new QHBoxLayout;
-    notesBar->setContentsMargins(0, 0, 0, 0);
-    notesBar->setSpacing(4);
-    auto *openNotesBtn = new QPushButton(QStringLiteral("Open Notes"));
-    auto *saveBtn = new QPushButton(QStringLiteral("Save  (Ctrl+S)"));
-    for (auto *b : {openNotesBtn, saveBtn}) { b->setFocusPolicy(Qt::NoFocus); notesBar->addWidget(b); }
-    connect(openNotesBtn, &QPushButton::clicked, this, [this] { openNotes(); });
-    connect(saveBtn, &QPushButton::clicked, this, [this] { saveDoc(); });
-    notesBar->addStretch(1);
-    nv->addLayout(notesBar);
-    nv->addLayout(makeRouteBar(SNotes, {SConsultant, SDeveloper, SShell}));
-    m_editor = new QPlainTextEdit;
-    m_editor->setPlaceholderText(QStringLiteral("NOTES / EDITOR - open a file, type, or route text in"));
+    m_editor = new EditorTabs;
+    QHBoxLayout *routes = makeRouteBar(SNotes, {SConsultant, SDeveloper, SShell, SNotes});
+    for (int i = 0; i < routes->count(); ++i)
+        if (auto *b = qobject_cast<QPushButton *>(routes->itemAt(i)->widget()))
+            if (b->property("routeDest").toInt() == SNotes) {
+                m_editorToNotes = b;
+                b->setText(QStringLiteral("→ Notes tab"));
+            }
+    nv->addLayout(routes);
     nv->addWidget(makePane(QStringLiteral("NOTES / EDITOR"), m_editor, &m_editorHeader,
                            nullptr, &m_editorFrame), 1);
 
-    // 3. Project Shell
+    // 2. Project Shell
     auto *shellBox = new QWidget;
     auto *sv = new QVBoxLayout(shellBox);
     sv->setContentsMargins(0, 0, 0, 0);
@@ -505,7 +545,6 @@ QWidget *MainWindow::buildBottomRow() {
 
     m_bottomSplit = new QSplitter(Qt::Horizontal);
     m_bottomSplit->setChildrenCollapsible(true);
-    m_bottomSplit->addWidget(projectPane);
     m_bottomSplit->addWidget(notesBox);
     m_bottomSplit->addWidget(shellBox);
     return m_bottomSplit;
@@ -746,18 +785,25 @@ QString MainWindow::liveText(Surface s) const {
     case SConsultant: return m_consultant.term ? m_consultant.term->selectedText(true) : QString();
     case SDeveloper:  return m_developer.term  ? m_developer.term->selectedText(true)  : QString();
     case SShell:      return m_shell.term      ? m_shell.term->selectedText(true)      : QString();
-    case SNotes: {
-        QString t = m_editor->textCursor().selectedText();
-        return t.replace(QChar(0x2029), QLatin1Char('\n'));   // QTextCursor uses U+2029
-    }
+    case SNotes:      return m_editor->activeSelection();   // the ACTIVE tab, Notes or a file
     default: return QString();
     }
 }
 
+QString MainWindow::sourceName(Surface s) const {
+    if (s == SNotes) return m_editor->activeSourceName();   // "NOTES" or "EDITOR main.cpp"
+    return QLatin1String(kName[s]);
+}
+
 void MainWindow::routeFrom(Surface source, Surface dest) {
+    const QString from = sourceName(source);
+    if (source == SNotes && dest == SNotes && m_editor->activeIsNotes()) {
+        say(QStringLiteral("The selection is already in Notes"), "warn");
+        return;
+    }
     QString text = liveText(source);           // live, from this source only
     if (text.isEmpty()) {
-        say(QStringLiteral("Nothing selected in %1").arg(kName[source]), "warn");
+        say(QStringLiteral("Nothing selected in %1").arg(from), "warn");
         return;
     }
     if (dest != SNotes) {
@@ -772,7 +818,7 @@ void MainWindow::routeFrom(Surface source, Surface dest) {
             && QMessageBox::question(this, QStringLiteral("Send large selection"),
                    QStringLiteral("Insert %1 lines (%2 bytes) from %3 into the %4 prompt?\n"
                                   "It will not be submitted.")
-                       .arg(text.count(QLatin1Char('\n')) + 1).arg(bytes).arg(kName[source], kName[dest]),
+                       .arg(text.count(QLatin1Char('\n')) + 1).arg(bytes).arg(from, QLatin1String(kName[dest])),
                    QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
             say(QStringLiteral("Send cancelled"));
             return;
@@ -782,12 +828,12 @@ void MainWindow::routeFrom(Surface source, Surface dest) {
         t->term->sendText(text);      // exactly these bytes; no Enter is ever appended
         t->term->setFocus(Qt::OtherFocusReason);
         say(QStringLiteral("Sent %1 chars from %2 to %3 - focus moved, not submitted")
-                .arg(visible).arg(kName[source], kName[dest]));
+                .arg(visible).arg(from, QLatin1String(kName[dest])));
         return;
     }
-    m_editor->insertPlainText(text);           // replaces selection, else inserts at cursor
-    m_editor->setFocus(Qt::OtherFocusReason);
-    say(QStringLiteral("Sent %1 chars from %2 to NOTES - focus moved").arg(text.size()).arg(kName[source]));
+    // Always the pinned Notes document, even while a file tab is showing.
+    m_editor->insertIntoNotes(text);
+    say(QStringLiteral("Sent %1 chars from %2 to NOTES - Notes tab shown, focus moved").arg(text.size()).arg(from));
 }
 
 void MainWindow::markFocus(Surface s) {
@@ -805,17 +851,17 @@ void MainWindow::markFocus(Surface s) {
 }
 
 // --------------------------------------------------------------------------
-// Consultant file action
+// File actions from the Files explorer
 // --------------------------------------------------------------------------
 
-void MainWindow::sendFileToConsultant() {
-    const QString path = m_consultantFiles->selectedPath();
-    if (path.isEmpty()) { say(QStringLiteral("No file selected in Consultant Files"), "warn"); return; }
+void MainWindow::sendFileContents(Surface dest) {
+    const QString path = m_files->selectedPath();
+    if (path.isEmpty()) { say(QStringLiteral("No file selected in Files"), "warn"); return; }
     const QFileInfo fi(path);
-    if (fi.isDir())       { say(QStringLiteral("%1 is a directory").arg(path), "warn"); return; }
+    if (fi.isDir())       { say(QStringLiteral("%1 is a folder - only a file's contents can be sent").arg(path), "warn"); return; }
     if (!fi.isReadable()) { say(QStringLiteral("Cannot read %1").arg(path), "error"); return; }
     if (fi.size() > kMaxSendBytes) {
-        say(QStringLiteral("Refusing to send %1 (%2 bytes, limit %3) - open it in Notes instead")
+        say(QStringLiteral("Refusing to send %1 (%2 bytes, limit %3) - open it in the editor instead")
                 .arg(path).arg(fi.size()).arg(kMaxSendBytes), "warn");
         return;
     }
@@ -827,23 +873,40 @@ void MainWindow::sendFileToConsultant() {
         say(QStringLiteral("Not a UTF-8 text file: %1").arg(path), "warn");
         return;
     }
+    Term *t = termFor(dest);
+    if (!t || !t->term) { say(QStringLiteral("%1 has no running session").arg(kName[dest]), "error"); return; }
     if (fi.size() > kConfirmSendBytes
-        && QMessageBox::question(this, QStringLiteral("Send file to Consultant"),
-               QStringLiteral("Insert %1 (%2 bytes) into the CONSULTANT prompt?")
-                   .arg(fi.fileName()).arg(fi.size()),
+        && QMessageBox::question(this, QStringLiteral("Send file to %1").arg(kShort[dest]),
+               QStringLiteral("Insert %1 (%2 bytes) into the %3 prompt?\nIt will not be submitted.")
+                   .arg(fi.fileName()).arg(fi.size()).arg(kName[dest]),
                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
         say(QStringLiteral("Send cancelled"));
         return;
     }
     while (text.endsWith(QLatin1Char('\n')) || text.endsWith(QLatin1Char('\r'))) text.chop(1);
     if (text.isEmpty()) { say(QStringLiteral("%1 is empty").arg(path), "warn"); return; }
-    if (!m_consultant.term) { say(QStringLiteral("CONSULTANT has no running session"), "error"); return; }
     const int visible = text.size();
-    m_consultant.term->bracketText(text);
-    m_consultant.term->sendText(text);          // never submitted
-    m_consultant.term->setFocus(Qt::OtherFocusReason);
-    say(QStringLiteral("Sent %1 (%2 chars) to CONSULTANT - focus moved, not submitted")
-            .arg(fi.fileName()).arg(visible));
+    t->term->bracketText(text);
+    t->term->sendText(text);                    // never submitted
+    t->term->setFocus(Qt::OtherFocusReason);
+    say(QStringLiteral("Sent %1 (%2 chars) from FILES to %3 - focus moved, not submitted")
+            .arg(fi.fileName()).arg(visible).arg(kName[dest]));
+}
+
+// The shell gets the path, quoted for a POSIX shell, never the contents.
+void MainWindow::sendFilePathToShell() {
+    const QString path = m_files->selectedPath();
+    if (path.isEmpty()) { say(QStringLiteral("No file selected in Files"), "warn"); return; }
+    if (!m_shell.term) { say(QStringLiteral("PROJECT SHELL has no running session"), "error"); return; }
+    static const QRegularExpression safe(QStringLiteral("^[A-Za-z0-9_./=:,+@%-]+$"));
+    QString quoted = path;
+    if (!safe.match(path).hasMatch())
+        quoted = QLatin1Char('\'') + quoted.replace(QLatin1Char('\''), QLatin1String("'\\''")) + QLatin1Char('\'');
+    QString text = quoted;
+    m_shell.term->bracketText(text);
+    m_shell.term->sendText(text);               // no Enter
+    m_shell.term->setFocus(Qt::OtherFocusReason);
+    say(QStringLiteral("Inserted the path %1 into PROJECT SHELL - focus moved, not run").arg(quoted));
 }
 
 // --------------------------------------------------------------------------
@@ -851,8 +914,11 @@ void MainWindow::sendFileToConsultant() {
 // --------------------------------------------------------------------------
 
 void MainWindow::wireEditor() {
-    connect(m_editor->document(), &QTextDocument::modificationChanged, this, [this](bool) { refreshDoc(); });
-    connect(m_editor, &QPlainTextEdit::cursorPositionChanged, this, [this] { markFocus(SNotes); });
+    connect(m_editor, &EditorTabs::message, this,
+            [this](const QString &t, const QString &l) { say(t, l.toLatin1().constData()); });
+    connect(m_editor, &EditorTabs::focused, this, [this] { markFocus(SNotes); });
+    connect(m_editor, &EditorTabs::stateChanged, this, [this] { refreshDoc(); });
+    connect(m_editor, &EditorTabs::openNotesRequested, this, [this] { openNotes(); });
     auto *save = new QAction(this);
     save->setShortcut(QKeySequence::Save);
     connect(save, &QAction::triggered, this, [this] { saveDoc(); });
@@ -860,100 +926,41 @@ void MainWindow::wireEditor() {
 }
 
 void MainWindow::refreshDoc() {
-    const bool dirty = m_editor->document()->isModified();
-    const QString name = m_docPath.isEmpty() ? QStringLiteral("(no file)") : m_docPath;
-    m_editorHeader->setText(QStringLiteral("NOTES / EDITOR   %1%2")
-                                .arg(name, dirty ? QStringLiteral(" *") : QString()));
+    m_editorHeader->setText(m_editor->headerText());
+    const QString path = m_editor->activePath();
+    const bool dirty = m_editor->activeEditor() && m_editor->activeEditor()->document()->isModified();
+    const QString name = m_editor->activeIsNotes()
+        ? (path.isEmpty() ? QStringLiteral("Notes") : QStringLiteral("Notes - %1").arg(path))
+        : path;
     setWindowTitle(QStringLiteral("ArchiDev2 - %1%2").arg(name, dirty ? QStringLiteral(" *") : QString()));
+    // From Notes itself "→ Notes" would be meaningless; from a file tab it copies into Notes.
+    if (m_editorToNotes) m_editorToNotes->setVisible(!m_editor->activeIsNotes());
 }
 
-bool MainWindow::saveDoc() {
-    if (m_docPath.isEmpty()) { say(QStringLiteral("No file open - nothing to save (no Save As yet)"), "warn"); return false; }
-    if (!m_editor->document()->isModified()) { say(QStringLiteral("No changes to save")); return true; }
-    const QFileInfo now(m_docPath);
-    if (now.exists() && (now.lastModified() != m_docMtime || now.size() != m_docSize)) {
-        if (QMessageBox::warning(this, QStringLiteral("Changed on disk"),
-                QStringLiteral("%1 changed on disk since it was opened.\n\nOverwrite it?").arg(m_docPath),
-                QMessageBox::Save | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Save) {
-            say(QStringLiteral("Save cancelled - %1 changed on disk").arg(m_docPath), "warn");
-            return false;
-        }
-    }
-    // QPlainTextEdit has no concept of a trailing newline, so editing the last
-    // line would otherwise strip the file's final "\n" and produce a spurious diff.
-    QString out = m_editor->toPlainText();
-    if (m_docEndedWithNewline && !out.isEmpty() && !out.endsWith(QLatin1Char('\n')))
-        out.append(QLatin1Char('\n'));
-    QSaveFile f(m_docPath);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Text) || f.write(out.toUtf8()) < 0 || !f.commit()) {
-        say(QStringLiteral("SAVE FAILED: %1 - %2 (file left unchanged, still unsaved)")
-                .arg(m_docPath, f.errorString()), "error");
-        return false;                                    // stays dirty on purpose
-    }
-    const QFileInfo after(m_docPath);
-    m_docMtime = after.lastModified();
-    m_docSize = after.size();
-    m_editor->document()->setModified(false);
-    refreshDoc();
-    say(QStringLiteral("Saved %1 (%2 bytes)").arg(m_docPath).arg(m_docSize));
-    return true;
-}
+bool MainWindow::saveDoc() { return m_editor->saveActive(); }
 
-bool MainWindow::confirmDiscard(const QString &what) {
-    if (!m_editor->document()->isModified()) return true;
-    const auto r = QMessageBox::question(this, QStringLiteral("Unsaved changes"),
-        QStringLiteral("%1 has unsaved changes.\n\n%2")
-            .arg(m_docPath.isEmpty() ? QStringLiteral("The editor buffer") : m_docPath, what),
-        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel);
-    if (r == QMessageBox::Cancel)  return false;
-    if (r == QMessageBox::Discard) return true;
-    return saveDoc();
-}
+void MainWindow::openFile(const QString &path) { m_editor->openFile(path); }
 
-void MainWindow::openFile(const QString &path) {
-    const QFileInfo fi(path);
-    if (fi.isDir()) return;
-    if (!fi.isReadable())          { say(QStringLiteral("Cannot read %1").arg(path), "error"); return; }
-    if (fi.size() > kMaxOpenBytes) { say(QStringLiteral("Refusing to open %1 (%2 bytes, limit %3)")
-                                             .arg(path).arg(fi.size()).arg(kMaxOpenBytes), "warn"); return; }
-    if (!confirmDiscard(QStringLiteral("Save before opening %1?").arg(fi.fileName()))) {
-        say(QStringLiteral("Open cancelled")); return;
-    }
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) { say(QStringLiteral("Cannot open %1 - %2").arg(path, f.errorString()), "error"); return; }
-    const QByteArray raw = f.readAll();
-    const QString text = QString::fromUtf8(raw);
-    if (raw.contains('\0') || text.toUtf8() != raw) {
-        say(QStringLiteral("Not a UTF-8 text file: %1 (left current document open)").arg(path), "warn");
-        return;
-    }
-    m_editor->setPlainText(text);
-    m_editor->document()->setModified(false);
-    m_docPath = path;
-    m_docMtime = fi.lastModified();
-    m_docSize = fi.size();
-    m_docEndedWithNewline = raw.isEmpty() || raw.endsWith('\n');
-    refreshDoc();
-    say(QStringLiteral("Opened %1 (%2 bytes)").arg(path).arg(fi.size()));
+QString MainWindow::notesFilePath() const {
+    const QString configured = m_cfg.str(QStringLiteral("workspace/notes_file")).trimmed();
+    if (configured.isEmpty()) return QString();
+    return QFileInfo(configured).isAbsolute() ? configured
+                                              : QDir(m_l.consultantDir).absoluteFilePath(configured);
 }
 
 void MainWindow::openNotes() {
-    const QString configured = m_cfg.str(QStringLiteral("workspace/notes_file")).trimmed();
-    if (configured.isEmpty()) {
+    const QString path = notesFilePath();
+    if (path.isEmpty()) {
         say(QStringLiteral("No notes file configured - set notes_file= under [workspace] in %1")
                 .arg(m_cfg.iniPath()), "warn");
         return;
     }
-    const QString path = QFileInfo(configured).isAbsolute()
-                             ? configured
-                             : QDir(m_l.consultantDir).absoluteFilePath(configured);
     if (!QFileInfo::exists(path)) {
         if (QMessageBox::question(this, QStringLiteral("Create notes file"),
                 QStringLiteral("%1 does not exist.\n\nCreate it?").arg(path),
                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes) != QMessageBox::Yes) {
             say(QStringLiteral("Notes file not created")); return;
         }
-        if (!confirmDiscard(QStringLiteral("Save before opening the notes file?"))) return;
         QSaveFile f(path);
         if (!f.open(QIODevice::WriteOnly | QIODevice::Text) || !f.commit()) {
             say(QStringLiteral("Cannot create %1 - %2").arg(path, f.errorString()), "error");
@@ -961,7 +968,7 @@ void MainWindow::openNotes() {
         }
         say(QStringLiteral("Created %1").arg(path));
     }
-    openFile(path);
+    m_editor->loadNotesFile(path);
 }
 
 // --------------------------------------------------------------------------
@@ -976,23 +983,29 @@ void MainWindow::restoreLayout() {
     m_topSplit->setSizes({pct("layout/top_consultant", 55) * 16, pct("layout/top_developer", 45) * 16});
     m_consultantSplit->setSizes({pct("layout/consultant_files", 24) * 8,
                                  pct("layout/consultant_term", 76) * 8});
-    m_bottomSplit->setSizes({pct("layout/bottom_project_files", 16) * 16,
-                             pct("layout/bottom_notes", 52) * 16,
-                             pct("layout/bottom_shell", 32) * 16});
+    // Older INIs had a Project Files column at the left of this row; its width
+    // goes to the editor.
+    const int editorPct = m_cfg.num(QStringLiteral("layout/bottom_editor"), 0) > 0
+        ? pct("layout/bottom_editor", 68)
+        : qBound(1, pct("layout/bottom_project_files", 16) + pct("layout/bottom_notes", 52), 99);
+    m_bottomSplit->setSizes({editorPct * 16, pct("layout/bottom_shell", 32) * 16});
 
-    const bool showConsultantFiles = m_cfg.flag(QStringLiteral("explorers/consultant_visible"), true);
+    const bool showConsultantFiles = m_cfg.flag(QStringLiteral("explorers/visible"),
+        m_cfg.flag(QStringLiteral("explorers/consultant_visible"), true));
     m_consultantFilesHost->setVisible(showConsultantFiles);
     m_consultantCollapse->setText(showConsultantFiles ? QStringLiteral("Hide Files")
                                                       : QStringLiteral("Show Files"));
 
-    m_consultantFiles->setSortToken(m_cfg.str(QStringLiteral("explorers/consultant_sort"),
-                                              QStringLiteral("name_asc")));
-    m_projectFiles->setSortToken(m_cfg.str(QStringLiteral("explorers/project_sort"),
-                                           QStringLiteral("name_asc")));
-    const QString cc = m_cfg.str(QStringLiteral("explorers/consultant_current")).trimmed();
-    if (!cc.isEmpty()) m_consultantFiles->setCurrentDir(cc);   // falls back to Start if unusable
-    const QString pc = m_cfg.str(QStringLiteral("explorers/project_current")).trimmed();
-    if (!pc.isEmpty()) m_projectFiles->setCurrentDir(pc);
+    // Each root keeps its own last folder and sort; an unusable folder falls
+    // back to that root's start when it is shown.
+    for (const QString &key : {QStringLiteral("consultant"), QStringLiteral("project")}) {
+        const int r = m_files->rootIndex(key);
+        m_files->setSortToken(r, m_cfg.str(QStringLiteral("explorers/%1_sort").arg(key), QStringLiteral("name_asc")));
+        const QString cur = m_cfg.str(QStringLiteral("explorers/%1_current").arg(key)).trimmed();
+        if (!cur.isEmpty()) m_files->setCurrentDir(r, cur);
+    }
+    const int active = m_files->rootIndex(m_cfg.str(QStringLiteral("explorers/root"), QStringLiteral("consultant")));
+    m_files->setActiveRoot(active < 0 ? 0 : active);
 }
 
 void MainWindow::saveLayout() {
@@ -1007,16 +1020,18 @@ void MainWindow::saveLayout() {
     // Written once, on close, rather than continuously while dragging.
     store(m_topSplit, {"layout/top_consultant", "layout/top_developer"});
     store(m_consultantSplit, {"layout/consultant_files", "layout/consultant_term"});
-    store(m_bottomSplit, {"layout/bottom_project_files", "layout/bottom_notes", "layout/bottom_shell"});
-    m_cfg.set(QStringLiteral("explorers/consultant_current"), m_consultantFiles->currentDir());
-    m_cfg.set(QStringLiteral("explorers/project_current"), m_projectFiles->currentDir());
-    m_cfg.set(QStringLiteral("explorers/consultant_sort"), m_consultantFiles->sortToken());
-    m_cfg.set(QStringLiteral("explorers/project_sort"), m_projectFiles->sortToken());
+    store(m_bottomSplit, {"layout/bottom_editor", "layout/bottom_shell"});
+    for (int r = 0; r < 2; ++r) {
+        const QString key = m_files->rootKey(r);
+        m_cfg.set(QStringLiteral("explorers/%1_current").arg(key), m_files->currentDir(r));
+        m_cfg.set(QStringLiteral("explorers/%1_sort").arg(key), m_files->sortToken(r));
+    }
+    m_cfg.set(QStringLiteral("explorers/root"), m_files->rootKey(m_files->activeRoot()));
     m_cfg.sync();
 }
 
 void MainWindow::closeEvent(QCloseEvent *e) {
-    if (!confirmDiscard(QStringLiteral("Save before closing?"))) { e->ignore(); return; }
+    if (!m_editor->confirmCloseAll()) { e->ignore(); say(QStringLiteral("Close cancelled")); return; }
     saveLayout();
     for (Term *t : {&m_consultant, &m_developer, &m_shell}) {
         retireTerm(t->term);                    // only PIDs this window started

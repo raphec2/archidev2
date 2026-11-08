@@ -7,8 +7,10 @@
 namespace Theme {
 
 QString paneBorder(bool active) {
-    return active ? QStringLiteral("border: 1px solid %1;").arg(QLatin1String(BlueActive))
-                  : QStringLiteral("border: 1px solid %1;").arg(QLatin1String(Divider));
+    // Scoped to the frame itself: an unscoped rule would also outline every
+    // button and editor inside the pane.
+    return QStringLiteral("QFrame#paneFrame { border: 1px solid %1; }")
+        .arg(QLatin1String(active ? BlueActive : Divider));
 }
 
 void apply(QApplication &app) {
@@ -81,12 +83,31 @@ QMessageBox, QDialog { background: @panel; color: @text; }
 QMessageBox QLabel   { color: @text; }
 QMenu                { background: @panel; color: @text; border: 1px solid @divider; }
 QMenu::item:selected { background: @selection; }
+QMenu::item:disabled { color: @dim; }
 QToolTip             { background: @raised; color: @text; border: 1px solid @divider; }
 
 /* Explorer toolbars: compact controls and an elided current-path label. */
 QLabel#pathLabel   { color: @dim; background: @window; padding: 2px 5px;
                      border: 1px solid @divider; }
 QPushButton#routeButton:checked { background: @blue; color: #ffffff; }
+
+/* Compact tool buttons: explorer root switch, Open, Send, editor toolbar. */
+QToolButton          { background: @raised; color: @text; border: 1px solid @divider; padding: 3px 7px; }
+QToolButton:hover    { border-color: @blue; }
+QToolButton:pressed  { background: @selection; }
+QToolButton:checked  { background: @selection; border-color: @blue; font-weight: bold; }
+QToolButton:disabled { color: @dim; }
+QToolButton[popupMode="2"] { padding-right: 14px; }
+
+/* Editor tabs. Text colour is left to the tab bar so Notes (amber) and
+   files changed on disk (red) keep their own colours. */
+QTabWidget::pane     { border: none; }
+QTabBar::tab         { background: @window; border: 1px solid @divider; border-bottom: 2px solid @window;
+                       padding: 4px 10px; margin-right: 2px; }
+QTabBar::tab:selected { background: @panel; border-bottom: 2px solid @blue; }
+QTabBar::tab:hover   { border-color: @blue; }
+QLineEdit            { background: @panel; color: @text; border: 1px solid @divider; padding: 2px 4px; }
+QLineEdit:focus      { border-color: @blue; }
 )");
     const QPair<const char *, const char *> tokens[] = {
         {"@window", Window}, {"@panel", Panel}, {"@raised", Raised}, {"@blue", Blue},

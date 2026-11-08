@@ -8,13 +8,13 @@
 #include <QVector>
 #include <QWidget>
 
+class EditorTabs;
 class ExplorerPane;
 class ProjectConfig;
 class QComboBox;
 class QFrame;
 class QHBoxLayout;
 class QLabel;
-class QPlainTextEdit;
 class QPushButton;
 class QSplitter;
 class QTermWidget;
@@ -86,16 +86,20 @@ private:
 
     // --- source-local routing
     QString liveText(Surface s) const;
+    QString sourceName(Surface s) const;    // names the active editor tab for SNotes
     void routeFrom(Surface source, Surface dest);
     void markFocus(Surface s);
 
     // --- editor / documents
     bool saveDoc();
-    bool confirmDiscard(const QString &what);
     void openFile(const QString &path);
     void openNotes();
+    QString notesFilePath() const;          // empty when notes_file is not configured
     void refreshDoc();
-    void sendFileToConsultant();
+
+    // --- Files explorer actions
+    void sendFileContents(Surface dest);    // Consultant or Developer prompt
+    void sendFilePathToShell();
 
     void say(const QString &m, const char *level = "");
 
@@ -103,11 +107,12 @@ private:
     ProjectConfig &m_cfg;
 
     Term m_consultant, m_developer, m_shell;
-    QPlainTextEdit *m_editor = nullptr;
+    EditorTabs *m_editor = nullptr;
     QLabel *m_editorHeader = nullptr;
     QFrame *m_editorFrame = nullptr;
-    ExplorerPane *m_consultantFiles = nullptr;
-    ExplorerPane *m_projectFiles = nullptr;
+    QPushButton *m_editorToNotes = nullptr;   // hidden while Notes is the active tab
+    ExplorerPane *m_files = nullptr;          // beside Consultant; Consultant or Project root
+    QLabel *m_filesHeader = nullptr;
     QWidget *m_consultantFilesHost = nullptr;
     QPushButton *m_consultantCollapse = nullptr;
     QSplitter *m_consultantSplit = nullptr;
@@ -115,9 +120,5 @@ private:
     QSplitter *m_bottomSplit = nullptr;
     QLabel *m_status = nullptr;
 
-    QString m_docPath;
-    QDateTime m_docMtime;
-    qint64 m_docSize = -1;
-    bool m_docEndedWithNewline = true;
     Surface m_focused = SConsultant;
 };
