@@ -78,6 +78,7 @@ public:
     struct Hooks {
         std::function<void()> dragPastEdge;     // once per drag
         std::function<void()> selectionDone;    // after each left release
+        std::function<void(const QPoint &)> contextMenu;
     };
 
     TerminalSelectionFilter(QWidget *display, Hooks hooks)
@@ -89,6 +90,7 @@ public:
 protected:
     bool eventFilter(QObject *target, QEvent *event) override {
         if (m_forwarding || target != m_display) return false;
+        if (event->type() == QEvent::ContextMenu) return true;
         if (event->type() == QEvent::Wheel) {
             // Let QTermWidget scroll first, then re-extend to the pointer.
             if (m_dragging) QTimer::singleShot(0, this, [this] { replayPointer(0); });
@@ -104,6 +106,11 @@ protected:
             return false;
         }
         auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() == Qt::RightButton) {
+            if (event->type() == QEvent::MouseButtonRelease && m_hooks.contextMenu)
+                m_hooks.contextMenu(mouse->globalPos());
+            return true;
+        }
         if (mouse->button() != Qt::LeftButton && !(mouse->buttons() & Qt::LeftButton))
             return false;
 
@@ -407,16 +414,16 @@ QWidget *MainWindow::buildConsultantArea() {
     });
 
     auto *sendBtn = new QToolButton;
-    sendBtn->setText(QStringLiteral("Send"));
+    sendBtn->setText(QStringLiteral("File actions ▾"));
     sendBtn->setPopupMode(QToolButton::InstantPopup);
-    sendBtn->setToolTip(QStringLiteral("Send the selected file: its contents into an AI prompt, or its path "
-                                       "into the shell. Never submitted."));
+    sendBtn->setToolTip(QStringLiteral("Insert the selected file's text into an AI prompt, or its path "
+                                       "into the shell. Nothing is submitted or run."));
     auto *menu = new QMenu(sendBtn);
-    QAction *toCons = menu->addAction(QStringLiteral("Contents → Consultant prompt"));
-    QAction *toDev = menu->addAction(QStringLiteral("Contents → Developer prompt"));
-    QAction *toShell = menu->addAction(QStringLiteral("Path → Shell"));
+    QAction *toCons = menu->addAction(QStringLiteral("Insert file contents in Consultant prompt"));
+    QAction *toDev = menu->addAction(QStringLiteral("Insert file contents in Developer prompt"));
+    QAction *toShell = menu->addAction(QStringLiteral("Insert file path in Shell"));
     menu->addSeparator();
-    QAction *copyPath = menu->addAction(QStringLiteral("Copy Path"));
+    QAction *copyPath = menu->addAction(QStringLiteral("Copy file path"));
     connect(toCons, &QAction::triggered, this, [this] { sendFileContents(SConsultant); });
     connect(toDev, &QAction::triggered, this, [this] { sendFileContents(SDeveloper); });
     connect(toShell, &QAction::triggered, this, [this] { sendFilePathToShell(); });
@@ -612,8 +619,20 @@ bool MainWindow::launchTerm(Term &t, Surface which, const AiProfile &p, const QS
                     const QString sel = t.term->selectedText(true);
                     if (sel.isEmpty()) return;
                     const int lines = sel.count(QLatin1Char('\n')) + 1;
-                    say(QStringLiteral("%1: %2 line(s), %3 chars selected - Ctrl+Shift+C copies, "
+                    say(QStringLiteral("%1: %2 line(s), %3 chars selected - Ctrl+C copies, "
                                        "the buttons above route it").arg(kName[which]).arg(lines).arg(sel.size()));
+                };
+                hooks.contextMenu = [this, &t, which](const QPoint &at) {
+                    if (!t.term) return;
+                    QMenu menu(t.term);
+                    QAction *copy = menu.addAction(QStringLiteral("Copy selection"));
+                    copy->setEnabled(!t.term->selectedText(true).isEmpty());
+                    QAction *paste = menu.addAction(QStringLiteral("Paste"));
+                    const QClipboard *cb = QGuiApplication::clipboard();
+                    paste->setEnabled(cb && !cb->text(QClipboard::Clipboard).isEmpty());
+                    QAction *chosen = menu.exec(at);
+                    if (chosen == copy) copyTerminalSelection(t, which);
+                    else if (chosen == paste) pasteTerminalClipboard(t, which);
                 };
                 child->installEventFilter(new TerminalSelectionFilter(child, std::move(hooks)));
                 break;
@@ -674,31 +693,42 @@ void MainWindow::installClipboardShortcuts(Term &t, Surface which) {
         t.term->addAction(a);
     };
 
-    add(QKeySequence(QStringLiteral("Ctrl+Shift+C")), [this, &t, which] {
-        if (!t.term) return;
-        const QString sel = t.term->selectedText(true);
-        if (sel.isEmpty()) {
-            say(QStringLiteral("Nothing selected in %1 to copy").arg(kName[which]), "warn");
-            return;
-        }
-        t.term->copyClipboard();                // -> QClipboard::Clipboard
-        say(QStringLiteral("Copied %1 chars from %2 to the system clipboard")
-                .arg(sel.size()).arg(kName[which]));
-    });
+    add(QKeySequence(QStringLiteral("Ctrl+Shift+C")), [this, &t, which] { copyTerminalSelection(t, which); });
+    add(QKeySequence(QStringLiteral("Ctrl+Shift+V")), [this, &t, which] { pasteTerminalClipboard(t, which); });
+    if (which != SShell) {
+        add(QKeySequence(QStringLiteral("Ctrl+C")), [this, &t, which] {
+            if (!t.term) return;
+            if (!t.term->selectedText(true).isEmpty()) copyTerminalSelection(t, which);
+            else t.term->sendText(QString(1, QChar(0x03))); // terminal interrupt (ETX)
+        });
+        add(QKeySequence(QStringLiteral("Ctrl+V")), [this, &t, which] { pasteTerminalClipboard(t, which); });
+    }
+}
 
-    add(QKeySequence(QStringLiteral("Ctrl+Shift+V")), [this, &t, which] {
-        if (!t.term) return;
-        const QClipboard *cb = QGuiApplication::clipboard();
-        const QString text = cb ? cb->text(QClipboard::Clipboard) : QString();
-        if (text.isEmpty()) {
-            // Do not hand the AI child a keystroke it will misread as something else.
-            say(QStringLiteral("Clipboard has no text to paste into %1").arg(kName[which]), "warn");
-            return;
-        }
-        t.term->pasteClipboard();   // bracketed where supported; never appends Enter
-        say(QStringLiteral("Pasted %1 chars from the system clipboard into %2 - not submitted")
-                .arg(text.size()).arg(kName[which]));
-    });
+bool MainWindow::copyTerminalSelection(Term &t, Surface which) {
+    if (!t.term) return false;
+    const QString sel = t.term->selectedText(true);
+    if (sel.isEmpty()) {
+        say(QStringLiteral("Nothing selected in %1 to copy").arg(kName[which]), "warn");
+        return false;
+    }
+    t.term->copyClipboard();
+    say(QStringLiteral("Copied %1 chars from %2 to the system clipboard")
+            .arg(sel.size()).arg(kName[which]));
+    return true;
+}
+
+void MainWindow::pasteTerminalClipboard(Term &t, Surface which) {
+    if (!t.term) return;
+    const QClipboard *cb = QGuiApplication::clipboard();
+    const QString text = cb ? cb->text(QClipboard::Clipboard) : QString();
+    if (text.isEmpty()) {
+        say(QStringLiteral("Clipboard has no text to paste into %1").arg(kName[which]), "warn");
+        return;
+    }
+    t.term->pasteClipboard();
+    say(QStringLiteral("Pasted %1 chars from the system clipboard into %2 - not submitted")
+            .arg(text.size()).arg(kName[which]));
 }
 
 void MainWindow::restartAi(Term &t, Surface which) {
@@ -861,7 +891,7 @@ void MainWindow::sendFileContents(Surface dest) {
     if (fi.isDir())       { say(QStringLiteral("%1 is a folder - only a file's contents can be sent").arg(path), "warn"); return; }
     if (!fi.isReadable()) { say(QStringLiteral("Cannot read %1").arg(path), "error"); return; }
     if (fi.size() > kMaxSendBytes) {
-        say(QStringLiteral("Refusing to send %1 (%2 bytes, limit %3) - open it in the editor instead")
+        say(QStringLiteral("Refusing to insert %1 (%2 bytes, limit %3) - open it in the editor instead")
                 .arg(path).arg(fi.size()).arg(kMaxSendBytes), "warn");
         return;
     }
@@ -876,11 +906,11 @@ void MainWindow::sendFileContents(Surface dest) {
     Term *t = termFor(dest);
     if (!t || !t->term) { say(QStringLiteral("%1 has no running session").arg(kName[dest]), "error"); return; }
     if (fi.size() > kConfirmSendBytes
-        && QMessageBox::question(this, QStringLiteral("Send file to %1").arg(kShort[dest]),
+        && QMessageBox::question(this, QStringLiteral("Insert file in %1").arg(kShort[dest]),
                QStringLiteral("Insert %1 (%2 bytes) into the %3 prompt?\nIt will not be submitted.")
                    .arg(fi.fileName()).arg(fi.size()).arg(kName[dest]),
                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
-        say(QStringLiteral("Send cancelled"));
+        say(QStringLiteral("Insert cancelled"));
         return;
     }
     while (text.endsWith(QLatin1Char('\n')) || text.endsWith(QLatin1Char('\r'))) text.chop(1);
@@ -889,7 +919,7 @@ void MainWindow::sendFileContents(Surface dest) {
     t->term->bracketText(text);
     t->term->sendText(text);                    // never submitted
     t->term->setFocus(Qt::OtherFocusReason);
-    say(QStringLiteral("Sent %1 (%2 chars) from FILES to %3 - focus moved, not submitted")
+    say(QStringLiteral("Inserted %1 (%2 chars) from FILES in %3 - focus moved, not submitted")
             .arg(fi.fileName()).arg(visible).arg(kName[dest]));
 }
 

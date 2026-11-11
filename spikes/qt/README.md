@@ -16,7 +16,7 @@ settings application.
 │ ┌──────────────┐[→ Notes][→ Shell][Dev →]│ [← Consultant] [→ Notes] [→ Shell] │
 │ │FILES·PROJECT │                         │                                    │
 │ │[Consultant|Project][↑]                 │ DEVELOPER terminal                 │
-│ │[Open][Send▾][⇅]│ CONSULTANT terminal   │                                    │
+│ │[Open][File actions▾][⇅]│ CONSULTANT terminal │                                 │
 │ │ tree         │                         │                                    │
 │ └──────────────┘                         │                                    │
 ├──────────────────────────────────────────┴───────────┬────────────────────────┤
@@ -343,6 +343,10 @@ In the Consultant and Developer panes:
 - **Hold the button and use the wheel**: the selection follows each wheel step even without
   moving the mouse, so *press, wheel, release* selects across any number of screens.
 - On release the status line reports how many lines and characters are selected.
+- In Consultant and Developer, `Ctrl+C` copies a selection; with no selection it interrupts
+  the running CLI. `Ctrl+V` pastes clipboard text without submitting it. Right-click opens
+  Copy selection and Paste. `Ctrl+Shift+C/V` remain available. The Project Shell keeps its
+  usual terminal `Ctrl+C` behaviour and the `Ctrl+Shift+C/V` clipboard shortcuts.
 - Routing a selection larger than 16 KB into a terminal asks first (Cancel is the default).
   Routing to Notes and `Ctrl+Shift+C` do not ask.
 
@@ -386,7 +390,7 @@ bottom-row Project Files explorer of earlier versions is gone; its width went to
 ```
 FILES · PROJECT
 [Consultant|Project] [↑]      root switch, Parent
-[Open] [Send ▾]      [⇅]      file actions, sort menu
+[Open] [File actions ▾] [⇅]   open, insert or copy, sort menu
 …/current/path
 tree
 ```
@@ -397,7 +401,7 @@ project.
   the same folder and the same selected file.
 - **Clicking the root that is showing** goes back to its top.
 - The header names the root on show: `FILES · CONSULTANT` or `FILES · PROJECT`.
-- **Labels:** when the pane is narrow, the root labels shorten to `Cons.` / `Proj.`. Open, Send
+- **Labels:** when the pane is narrow, the root labels shorten to `Cons.` / `Proj.`. Open, File actions
   and the sort button keep their natural width; the pane gets a minimum width instead of eliding
   them.
 
@@ -416,14 +420,15 @@ The active root is saved as `root=`.
 **Open** opens the selected file in its own editor tab; double-clicking does the same. Notes is
 never replaced.
 
-**Send ▾** acts on the selected item:
+**File actions ▾** acts on the selected item. The first two actions insert the file's text into
+an AI prompt; the Shell action inserts its path. They do not press Enter:
 
 | Action | What is sent |
 |---|---|
-| Contents → Consultant prompt | the file's text, inserted with the bracketed-paste path and never submitted |
-| Contents → Developer prompt | the same, into Developer |
-| Path → Shell | the absolute path, single-quoted when it contains spaces or shell characters; never run |
-| Copy Path | the absolute path, to the system clipboard |
+| Insert file contents in Consultant prompt | the file's text, inserted with the bracketed-paste path and never submitted |
+| Insert file contents in Developer prompt | the same, into Developer |
+| Insert file path in Shell | the absolute path, single-quoted when it contains spaces or shell characters; never run |
+| Copy file path | the absolute path, to the system clipboard |
 
 The Contents actions are disabled for folders. They refuse non-UTF-8 or NUL-containing files,
 and anything over 256 KB ("open it in the editor instead"). Above 16 KB they ask first, with

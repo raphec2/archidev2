@@ -82,6 +82,8 @@ private:
     void refreshPending(Term &t);
     Term *termFor(Surface s);
     void installClipboardShortcuts(Term &t, Surface which);
+    bool copyTerminalSelection(Term &t, Surface which);
+    void pasteTerminalClipboard(Term &t, Surface which);
     QComboBox *addRoleControls(QHBoxLayout *bar, Term &t, Surface which, const QString &label);
 
     // --- source-local routing
