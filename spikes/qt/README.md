@@ -380,6 +380,22 @@ goes through `QTermWidget::bracketText()` — which wraps in `\e[200~…\e[201~`
 running program enabled bracketed paste — and is delivered with `sendText()`. **No Enter is ever
 appended**, and the desktop clipboard is never used for internal routing.
 
+Before and after the insert, the destination pane is scrolled to its prompt. A terminal follows
+new output only while its view is at the bottom, and `sendText()` (unlike a typed key) does not
+scroll it back, so with a long Codex transcript scrolled up the text used to arrive out of sight
+while the status said "Sent". (`QTermWidget::scrollToEnd()` alone does not repaint a pane whose
+program stays silent, so the display's own scroll bar is moved instead.) The status line then says
+"Sent N chars from X to Y - not submitted, scrolled to its prompt". "Sent" means the bytes reached
+the program; if it has not redrawn its screen within 1.5 s — busy, showing a dialog, or simply not
+echoing — a warning follows: *"Y has not redrawn since the insert … Check its prompt before
+pressing Enter."* Ctrl+V paste into a terminal scrolls to the prompt the same way.
+
+Live check (Xephyr, real Codex 0.167.2 `--no-alt-screen`, traced with strace): an 821-char
+selection of AGENTS.md routed from an editor tab arrived as one bracketed paste, byte-exact, and
+Codex showed it in the composer. With the pane scrolled up, the old build left the view on old
+history (reproduced with a 300-line recorder pane); the fixed build returns to the prompt, also with
+real Codex scrolled up. Not reproduced: the exact state of the user's own long Consultant session.
+
 ## Files explorer
 
 One stock `QFileSystemModel` + `QTreeView` — lazy, threaded, self-updating, no custom model or

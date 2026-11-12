@@ -29,9 +29,11 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScrollBar>
 #include <QScopedValueRollback>
 #include <QSplitter>
 #include <QStyle>
@@ -39,6 +41,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <memory>
 #include <signal.h>
 #include <qtermwidget.h>
 
@@ -46,6 +49,18 @@ static const char *kName[]  = {"CONSULTANT", "DEVELOPER", "PROJECT SHELL", "NOTE
 static const char *kShort[] = {"Consultant", "Developer", "Shell", "Notes"};
 static const qint64 kMaxSendBytes     = 256 * 1024;       // hard limit for file -> terminal
 static const qint64 kConfirmSendBytes = 16 * 1024;        // ask above this
+static const int kInsertEchoMs = 1500;    // a program should redraw an insert well within this
+
+// QTermWidget::scrollToEnd() moves the view but repaints only when output
+// next arrives, so a silent or busy program stays scrolled up on screen.
+// Moving the display's own scroll bar runs its repaint path instead.
+static void showPrompt(QTermWidget *term) {
+    if (auto *bar = term->findChild<QScrollBar *>()) {
+        if (bar->value() != bar->maximum()) bar->setValue(bar->maximum());
+        return;
+    }
+    term->scrollToEnd();
+}
 
 static const int kAiHistoryLines = 20000;           // QTermWidget default is 1000
 
@@ -726,7 +741,9 @@ void MainWindow::pasteTerminalClipboard(Term &t, Surface which) {
         say(QStringLiteral("Clipboard has no text to paste into %1").arg(kName[which]), "warn");
         return;
     }
+    showPrompt(t.term);             // as for routed text: keep the prompt in view
     t.term->pasteClipboard();
+    showPrompt(t.term);
     say(QStringLiteral("Pasted %1 chars from the system clipboard into %2 - not submitted")
             .arg(text.size()).arg(kName[which]));
 }
@@ -853,12 +870,8 @@ void MainWindow::routeFrom(Surface source, Surface dest) {
             say(QStringLiteral("Send cancelled"));
             return;
         }
-        const int visible = text.size();       // count before bracketing adds marker bytes
-        t->term->bracketText(text);   // wraps in \e[200~..\e[201~ only if the app enabled it
-        t->term->sendText(text);      // exactly these bytes; no Enter is ever appended
-        t->term->setFocus(Qt::OtherFocusReason);
-        say(QStringLiteral("Sent %1 chars from %2 to %3 - focus moved, not submitted")
-                .arg(visible).arg(from, QLatin1String(kName[dest])));
+        insertIntoTerminal(*t, dest, text,
+                           QStringLiteral("Sent %1 chars from %2 to %3").arg(text.size()).arg(from, QLatin1String(kName[dest])));
         return;
     }
     // Always the pinned Notes document, even while a file tab is showing.
@@ -915,12 +928,9 @@ void MainWindow::sendFileContents(Surface dest) {
     }
     while (text.endsWith(QLatin1Char('\n')) || text.endsWith(QLatin1Char('\r'))) text.chop(1);
     if (text.isEmpty()) { say(QStringLiteral("%1 is empty").arg(path), "warn"); return; }
-    const int visible = text.size();
-    t->term->bracketText(text);
-    t->term->sendText(text);                    // never submitted
-    t->term->setFocus(Qt::OtherFocusReason);
-    say(QStringLiteral("Inserted %1 (%2 chars) from FILES in %3 - focus moved, not submitted")
-            .arg(fi.fileName()).arg(visible).arg(kName[dest]));
+    insertIntoTerminal(*t, dest, text,
+                       QStringLiteral("Inserted %1 (%2 chars) from FILES in %3")
+                           .arg(fi.fileName()).arg(text.size()).arg(kName[dest]));
 }
 
 // The shell gets the path, quoted for a POSIX shell, never the contents.
@@ -932,11 +942,36 @@ void MainWindow::sendFilePathToShell() {
     QString quoted = path;
     if (!safe.match(path).hasMatch())
         quoted = QLatin1Char('\'') + quoted.replace(QLatin1Char('\''), QLatin1String("'\\''")) + QLatin1Char('\'');
-    QString text = quoted;
-    m_shell.term->bracketText(text);
-    m_shell.term->sendText(text);               // no Enter
-    m_shell.term->setFocus(Qt::OtherFocusReason);
-    say(QStringLiteral("Inserted the path %1 into PROJECT SHELL - focus moved, not run").arg(quoted));
+    insertIntoTerminal(m_shell, SShell, quoted,
+                       QStringLiteral("Inserted the path %1 into PROJECT SHELL").arg(quoted));
+}
+
+// A terminal only follows new output while its view is at the bottom, and
+// sendText() - unlike a typed key - does not scroll it back. With a long
+// transcript scrolled up (common with Codex --no-alt-screen) the insert landed
+// out of sight while the status still said "Sent". So: scroll to the prompt
+// first, and since "sent" only means the bytes reached the program, watch for
+// it to redraw and say so plainly if it does not.
+void MainWindow::insertIntoTerminal(Term &t, Surface dest, QString text, const QString &done) {
+    QTermWidget *term = t.term;
+    const QString where = QLatin1String(dest == SShell ? "not run" : "not submitted");
+    showPrompt(term);
+    auto redrew = std::make_shared<bool>(false);
+    auto watch = std::make_shared<QMetaObject::Connection>();
+    *watch = connect(term, &QTermWidget::receivedData, this, [redrew] { *redrew = true; });
+    term->bracketText(text);     // wraps in \e[200~..\e[201~ only if the program enabled it
+    term->sendText(text);        // exactly these bytes; no Enter is ever appended
+    showPrompt(term);
+    term->setFocus(Qt::OtherFocusReason);
+    say(QStringLiteral("%1 - %2, scrolled to its prompt").arg(done, where));
+    const QPointer<QTermWidget> alive(term);
+    const QString name = QLatin1String(kName[dest]);
+    QTimer::singleShot(kInsertEchoMs, this, [this, watch, redrew, alive, name, where] {
+        disconnect(*watch);
+        if (!alive || *redrew) return;
+        say(QStringLiteral("%1 has not redrawn since the insert - it may be busy, scrolled, or showing a "
+                           "dialog. Check its prompt before pressing Enter (%2).").arg(name, where), "warn");
+    });
 }
 
 // --------------------------------------------------------------------------

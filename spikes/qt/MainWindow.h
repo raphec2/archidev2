@@ -102,6 +102,9 @@ private:
     // --- Files explorer actions
     void sendFileContents(Surface dest);    // Consultant or Developer prompt
     void sendFilePathToShell();
+    // Insert text at a terminal's prompt (never submitted): scroll to the
+    // prompt, send, focus, report, and warn if the program does not redraw.
+    void insertIntoTerminal(Term &t, Surface dest, QString text, const QString &done);
 
     void say(const QString &m, const char *level = "");
 
