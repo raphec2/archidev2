@@ -5,24 +5,27 @@ A personal, Linux-first, **CLI-launched** workspace for working with terminal AI
 > Select text in any surface → click a destination → it is inserted without being submitted →
 > focus follows it.
 
-Three terminals (Consultant AI, Developer AI, Project Shell), two file explorers, one shared
-Notes/Editor, and **source-local routing controls**. Not an IDE, not a launcher app, not a
+Three terminals (Consultant AI, Developer AI, Project Shell), one file explorer that switches
+between the Consultant and Project folders, a tabbed **Notes + Editor**, and **source-local
+routing controls**. Not an IDE, not a launcher app, not a
 settings application.
 
 ```
 ┌──────────────────────────────────────────┬────────────────────────────────────┐
 │ Consultant: [prof ▾][New][Resume…][Hide] │ Developer: [prof ▾][New][Resume…]  │
-│ [→ Notes] [→ Shell]       [Developer →]  │ [← Consultant] [→ Notes] [→ Shell] │
-│ ┌───────────────┬──────────────────────┐ │                                    │
-│ │ CONSULTANT    │ CONSULTANT terminal  │ │ DEVELOPER terminal                 │
-│ │ FILES         │                      │ │                                    │
-│ └───────────────┴──────────────────────┘ │                                    │
-├──────────────────┬───────────────────────┴────────────┬───────────────────────┤
-│ PROJECT FILES    │ NOTES / EDITOR                     │ PROJECT SHELL         │
-│ ↑ Parent ⌂ Start │ [Open Notes] [Save]                │ [Restart Shell]       │
-│ [Sort ▾] /path   │ [→ Consultant] [→ Developer]       │ [→ Consultant]        │
-│ [Open in Notes]  │ [→ Shell]                          │ [→ Developer] [→ Notes]│
-└──────────────────┴────────────────────────────────────┴───────────────────────┘
+│ ┌──────────────┐[→ Notes][→ Shell][Dev →]│ [← Consultant] [→ Notes] [→ Shell] │
+│ │FILES·PROJECT │                         │                                    │
+│ │[Consultant|Project][↑]                 │ DEVELOPER terminal                 │
+│ │[Open][File actions▾][⇅]│ CONSULTANT terminal │                                 │
+│ │ tree         │                         │                                    │
+│ └──────────────┘                         │                                    │
+├──────────────────────────────────────────┴───────────┬────────────────────────┤
+│ [→ Consultant] [→ Developer] [→ Shell] [→ Notes tab] │ [Restart Shell]        │
+│ EDITOR  main.cpp  ● unsaved changes  — /path         │ [→ Consultant]         │
+│ [Open Notes][Save][Reload][Find]        Ln 3, Col 5  │ [→ Developer][→ Notes] │
+│ [Notes][main.cpp ●][util.py ✕]                       │ PROJECT SHELL          │
+│  1 int main() {          (line numbers, colouring)   │                        │
+└──────────────────────────────────────────────────────┴────────────────────────┘
 │ status                                                                         │
 ```
 
@@ -147,7 +150,9 @@ On first run the file is created with explanatory comments:
 
 [workspace]
 consultant_directory=/path/to/consulting
-# notes_file: a plain text file opened by the "Open Notes" button.
+# notes_file: a plain text file shown in the pinned Notes tab. It is loaded
+# at startup when it exists; "Open Notes" loads or creates it. Blank keeps
+# Notes as a scratch buffer that is not saved.
 # Relative paths resolve against consultant_directory.
 notes_file=
 
@@ -169,11 +174,11 @@ program=
 arguments=-l
 
 [explorers]
-consultant_visible=true
+visible=true
+root=consultant
 consultant_current=
 consultant_sort=name_asc
 consultant_allow_above_start=true
-project_visible=true
 project_current=
 project_sort=name_asc
 project_allow_above_start=false
@@ -181,11 +186,10 @@ project_allow_above_start=false
 [layout]
 top_consultant=55
 top_developer=45
-consultant_files=32
-consultant_term=68
-bottom_project_files=22
-bottom_notes=48
-bottom_shell=30
+consultant_files=24
+consultant_term=76
+bottom_editor=68
+bottom_shell=32
 ```
 
 **Writes preserve your comments.** `QSettings::sync()` would rewrite the whole file in its own
@@ -295,14 +299,22 @@ selection.** There is no global "last selected surface" — that model is gone, 
 disabled. Consultant's buttons always send Consultant's text even if Notes, Developer and Shell
 all hold selections at the same time.
 
-Each source gets buttons for the other three surfaces only, so nothing can target itself:
+Each source gets buttons for the other surfaces only, so nothing can target itself. The editor's
+**→ Notes tab** appears only while a file tab is showing:
 
 | Source | Buttons | Reads |
 |---|---|---|
 | Consultant | → Notes, → Shell, Developer → | `consultantTerminal->selectedText(true)` |
 | Developer | ← Consultant, → Notes, → Shell | `developerTerminal->selectedText(true)` |
-| Notes | → Consultant, → Developer, → Shell | `editor->textCursor().selectedText()` |
+| Notes / Editor | → Consultant, → Developer, → Shell, → Notes tab | the **active tab's** selection |
 | Project Shell | → Consultant, → Developer, → Notes | `shellTerminal->selectedText(true)` |
+
+**The editor area routes from whichever tab is showing**, and the status line names it:
+`Sent 6 chars from EDITOR main.cpp to DEVELOPER`, or `from NOTES` when Notes is showing. From a
+file tab, **→ Notes tab** copies the selection into Notes; it is hidden while Notes itself is
+showing. **Every → Notes button (from Consultant, Developer or Shell) always targets the pinned
+Notes tab**, inserting at the Notes cursor and showing that tab, even when a code tab was
+active. A file tab is never written to by routing.
 
 The selection is read live at click time, never cached and never borrowed. A source with nothing
 selected reports `Nothing selected in CONSULTANT` (or DEVELOPER / NOTES / PROJECT SHELL) rather
@@ -331,6 +343,10 @@ In the Consultant and Developer panes:
 - **Hold the button and use the wheel**: the selection follows each wheel step even without
   moving the mouse, so *press, wheel, release* selects across any number of screens.
 - On release the status line reports how many lines and characters are selected.
+- In Consultant and Developer, `Ctrl+C` copies a selection; with no selection it interrupts
+  the running CLI. `Ctrl+V` pastes clipboard text without submitting it. Right-click opens
+  Copy selection and Paste. `Ctrl+Shift+C/V` remain available. The Project Shell keeps its
+  usual terminal `Ctrl+C` behaviour and the `Ctrl+Shift+C/V` clipboard shortcuts.
 - Routing a selection larger than 16 KB into a terminal asks first (Cancel is the default).
   Routing to Notes and `Ctrl+Shift+C` do not ask.
 
@@ -364,44 +380,136 @@ goes through `QTermWidget::bracketText()` — which wraps in `\e[200~…\e[201~`
 running program enabled bracketed paste — and is delivered with `sendText()`. **No Enter is ever
 appended**, and the desktop clipboard is never used for internal routing.
 
-## Explorers
+Before and after the insert, the destination pane is scrolled to its prompt. A terminal follows
+new output only while its view is at the bottom, and `sendText()` (unlike a typed key) does not
+scroll it back, so with a long Codex transcript scrolled up the text used to arrive out of sight
+while the status said "Sent". (`QTermWidget::scrollToEnd()` alone does not repaint a pane whose
+program stays silent, so the display's own scroll bar is moved instead.) The status line then says
+"Sent N chars from X to Y - not submitted, scrolled to its prompt". "Sent" means the bytes reached
+the program; if it has not redrawn its screen within 1.5 s — busy, showing a dialog, or simply not
+echoing — a warning follows: *"Y has not redrawn since the insert … Check its prompt before
+pressing Enter."* Ctrl+V paste into a terminal scrolls to the prompt the same way.
 
-Both are stock `QFileSystemModel` + `QTreeView` — lazy, threaded, self-updating, no custom model
-or crawler. The only custom model code is a small `ExplorerSortProxy` that keeps folders first.
+Live check (Xephyr, real Codex 0.167.2 `--no-alt-screen`, traced with strace): an 821-char
+selection of AGENTS.md routed from an editor tab arrived as one bracketed paste, byte-exact, and
+Codex showed it in the composer. With the pane scrolled up, the old build left the view on old
+history (reproduced with a 300-line recorder pane); the fixed build returns to the prompt, also with
+real Codex scrolled up. Not reproduced: the exact state of the user's own long Consultant session.
 
-**Consultant Files** is attached inside the Consultant area, left of its terminal, and can be
-hidden with **Hide Files**. **Project Files** sits at the bottom left. Each has its own toolbar:
+## Files explorer
+
+One stock `QFileSystemModel` + `QTreeView` — lazy, threaded, self-updating, no custom model or
+crawler. The only custom model code is a small `ExplorerSortProxy` that keeps folders first.
+It sits inside the Consultant area, left of its terminal, and **Hide Files** hides it. The
+bottom-row Project Files explorer of earlier versions is gone; its width went to the editor.
 
 ```
-[↑ Parent] [⌂ Start] [Sort ▾]  /current/path   [Send File → Consultant] [Open in Notes]
+FILES · PROJECT
+[Consultant|Project] [↑]      root switch, Parent
+[Open] [File actions ▾] [⇅]   open, insert or copy, sort menu
+…/current/path
+tree
 ```
 
-*Start* is where the explorer opens and where ⌂ returns to; *Current* is where it is looking now.
-**Parent** walks up from Current. With `allow_above_start=false` (the Project default) it stops
-at Start, comparing canonical paths so a symlink cannot step outside; with `true` (the Consultant
-default) it can walk to `/`. Either way **explorer navigation never changes a terminal's working
-directory** — it only changes the view.
+**Two roots, one pane.** *Consultant* is `consultant_directory`; *Project* is the launched
+project.
+- **Clicking the root that is not showing** switches to it and reopens it where you left it:
+  the same folder and the same selected file.
+- **Clicking the root that is showing** goes back to its top.
+- The header names the root on show: `FILES · CONSULTANT` or `FILES · PROJECT`.
+- **Labels:** when the pane is narrow, the root labels shorten to `Cons.` / `Proj.`. Open, File actions
+  and the sort button keep their natural width; the pane gets a minimum width instead of eliding
+  them.
 
-Six sort modes — name A→Z / Z→A, modified newest / oldest, size largest / smallest — with folders
-always first and name as the tiebreaker. Each explorer sorts independently, keeps its mode while
-navigating, and falls back to `name_asc` on an unrecognised value.
+Each root keeps its own:
+- **Folder:** `*_current`, saved on close. A saved folder that is missing or out of bounds falls
+  back to that root.
+- **Sort order:** `*_sort`. There are six modes: name A→Z / Z→A, modified newest / oldest, size
+  largest / smallest. Folders always come first, with name as the tiebreaker.
+- **Boundary:** `*_allow_above_start`. With `false` (the Project default), **Parent** stops at
+  the root and is disabled there, comparing canonical paths so a symlink cannot step outside.
+  With `true` (the Consultant default), it can walk up to `/`.
 
-**Send File → Consultant** (Consultant Files only) inserts the selected text file straight into
-the Consultant prompt using the same bracketed-paste path, never submitted. It refuses
-directories, non-UTF-8/NUL files and anything over 256 KB, and asks for confirmation above 16 KB.
-Double-clicking a file opens it in Notes; sending to Consultant stays an explicit button.
+**Explorer navigation never changes a terminal's working directory**; it only changes the view.
+The active root is saved as `root=`.
 
-## Notes / Editor
+**Open** opens the selected file in its own editor tab; double-clicking does the same. Notes is
+never replaced.
 
-One shared document, opened from either explorer or from **Open Notes**: explicit **Save** /
-`Ctrl+S`, dirty marker in the header and title, atomic writes via `QSaveFile`, an overwrite prompt if the file changed on disk, and
-refusal of non-UTF-8, NUL-containing, oversized (>8 MB) or unreadable files with the current
-document left open. A file's trailing-newline convention is preserved.
+**File actions ▾** acts on the selected item. The first two actions insert the file's text into
+an AI prompt; the Shell action inserts its path. They do not press Enter:
 
-**Open Notes** opens `notes_file` in that same editor — relative paths resolve against the
-consultant directory. If it is missing you are offered to create it; if unset, the status line
-says to set `notes_file` in the INI. There is no separate notes editor. Routing text into Notes
-marks the document dirty like any other edit.
+| Action | What is sent |
+|---|---|
+| Insert file contents in Consultant prompt | the file's text, inserted with the bracketed-paste path and never submitted |
+| Insert file contents in Developer prompt | the same, into Developer |
+| Insert file path in Shell | the absolute path, single-quoted when it contains spaces or shell characters; never run |
+| Copy file path | the absolute path, to the system clipboard |
+
+The Contents actions are disabled for folders. They refuse non-UTF-8 or NUL-containing files,
+and anything over 256 KB ("open it in the editor instead"). Above 16 KB they ask first, with
+Cancel as the default. Trailing newlines are dropped, so nothing can submit the prompt.
+
+## Notes + Editor
+
+A tab bar with a pinned **Notes** tab first. Every file you open gets its own tab after it.
+
+**Notes is a distinct document.** It is never closed (it has no close button), never moved, and
+never replaced by an opened file.
+- **With `notes_file` set:** the file is loaded into Notes at startup when it exists. **Open
+  Notes** loads it, or offers to create it.
+- **Without it:** Notes is a scratch buffer. It is not a file and cannot be saved; you're asked
+  before its edits are discarded.
+- **Style:** Notes keeps the proportional font, word wrap and no line numbers, and its tab label
+  is amber.
+- **Notes file opened from Files:** opening the configured notes file from Files shows the Notes
+  tab instead of opening a second copy.
+
+**File tabs** use a fixed-width font, no wrap, line numbers, current-line highlight and basic
+syntax colouring.
+- **Colouring:** keywords, strings, comments, numbers, Markdown headings and code spans, and
+  markup tags. It covers C-family files (C/C++, Java, JS/TS, Rust, Go, C#, QML, CSS…), Python,
+  shell (by extension or `#!` line), JSON, Markdown, HTML/XML, and `#`-comment config files
+  (INI, TOML, YAML, CMake, Makefile…).
+- **No colouring:** other files and anything over 1 MB.
+- **One tab per file:** opening an already open file switches to its tab. Two files with the
+  same name are labelled with their folder, e.g. `main.cpp — src`.
+
+**State is always visible:**
+- A tab with unsaved changes shows `●`.
+- A tab whose file changed or was deleted on disk turns red. This is checked when the tab
+  changes, the cursor moves, or the window becomes active again.
+- The header leads with the name and state: `EDITOR  main.cpp  ● unsaved changes  ⚠ changed on
+  disk…  (1 other tab(s) unsaved)  — /full/path`. The path comes last, so a narrow pane clips
+  that, not the markers.
+- The toolbar shows the file type and `Ln, Col`. The window title names the active document.
+
+**Toolbar and keys**
+
+| Control | Action |
+|---|---|
+| **Save** / `Ctrl+S` | saves the active tab |
+| **Reload** | re-reads the active tab's file; asks first if it has unsaved changes |
+| **Find** / `Ctrl+F` | find bar for the active tab |
+| `Enter` / `F3` | next match |
+| `Shift+Enter` / `Shift+F3` | previous match |
+| **Aa** | match case |
+| `Esc` | closes the find bar |
+| `Ctrl+W` | closes the active file tab |
+
+The find bar counts matches ("2 of 5") and wraps around.
+
+**Every editable document has the same safeguards**, Notes included:
+- **On open or reload:** refuses unreadable, non-UTF-8, NUL-containing and oversized (> 8 MB)
+  files, and leaves what is open untouched.
+- **On save:** writes atomically with `QSaveFile`, and keeps the file's trailing-newline
+  convention.
+- **Changed on disk:** if the file changed since it was opened or last saved, Save asks
+  "Overwrite it?" (Cancel by default) before writing.
+- **Closing:** closing a tab with unsaved changes asks Save / Discard Changes / Cancel. Closing
+  the window asks the same, once per unsaved tab; Cancel at any point keeps the window open.
+
+Routing text into Notes marks it edited like any other change.
 
 ## Project Shell
 
@@ -420,10 +528,16 @@ muted. Terminals use the installed **`WhiteOnBlack`** scheme (verified in
 
 ## Layout persistence
 
-Splitter proportions, explorer visibility, each explorer's current directory and each explorer's
-sort mode are stored in `[layout]` and `[explorers]`, written **once on close** rather than
-continuously while navigating or dragging. A saved current directory that no longer exists or
-falls outside a bounded root silently reverts to Start. Impossible
+Splitter proportions, explorer visibility, the active root, and each root's folder and sort mode
+are stored in `[layout]` and `[explorers]`. They are written **once on close** rather than
+continuously while navigating or dragging. A saved folder that no longer exists, or falls outside
+a bounded root, reverts to that root.
+
+Older INIs carry `bottom_project_files` and `bottom_notes`, plus `consultant_visible` and
+`project_visible`. When `bottom_editor` is missing, the editor gets `bottom_project_files +
+bottom_notes`, so the freed width goes to the editor. `visible` falls back to
+`consultant_visible`. The old keys are left in place and ignored afterwards. Open tabs are not
+persisted. Impossible
 values are ignored in favour of the compiled defaults. Editor contents are never persisted.
 
 ## Verified automatically
@@ -435,11 +549,26 @@ isolation (each changes only its own PID, routing still reaches it, no orphans),
 the editor to all three terminals without execution, notes via a relative path, atomic save,
 trailing-newline preservation, and a comment-preserving INI round-trip.
 
+The tabbed editor and single explorer were checked live on a separate X display, driven with
+synthetic mouse and keyboard input. The test projects used recorder programs in place of the AIs
+and shell, so every inserted byte could be compared. Covered:
+- switching roots, Parent stopping at the Project boundary, and per-root folder and selection
+  memory across a close and reopen;
+- several unsaved tabs, a save conflict (cancel, then overwrite), and Reload;
+- find;
+- file sends: contents to Consultant and Developer byte for byte without Enter, the 16 KB
+  confirmation, and refusals for 300 KB, binary and folder;
+- a quoted path to Shell, and Copy Path;
+- routing from a code tab, AI → Notes while a code tab is active, and Notes file loading;
+- close prompts;
+- the layout at 1100×700 and at the 1043×640 minimum.
+
 ## Needs your eyes
 
 The three-terminal layout and proportions; the dark theme and whether the active-surface border
-reads clearly; Consultant vs Project explorer widths; collapse/restore; the notes flow including
-the creation prompt; restarting into **real** Codex/Claude sessions from the dropdowns; routing
+reads clearly; the Files explorer's width and root switch with your real folders; the tabbed
+editor with your own files (colouring, find, unsaved markers); collapse/restore; the notes flow
+including the creation prompt; restarting into **real** Codex/Claude sessions from the dropdowns; routing
 between all four surfaces by hand; multiline safety in a live AI prompt; and modal dialog
 readability. In your normal window: edge-drag speed and wheel-while-dragging with your own
 mouse or touchpad, and Resume… into a real conversation in each role.
@@ -449,10 +578,15 @@ mouse or touchpad, and Resume… into a real conversation in each role.
 - **A literal `$` cannot be passed in a profile field.** QTermWidget's
   `Session::setProgram/setArguments/setInitialWorkingDirectory` all run `ShellCommand::expand()`,
   and its `\$` escape leaves the backslash behind. ArchiDev2 warns rather than surprising you.
-- No Save As, no tabs, no syntax highlighting, no settings screen, no third explorer.
+- No Save As, no replace, no language server, no settings screen. Syntax colouring is one line
+  at a time with a small keyword list per file type, so it is approximate.
+- Tabs cannot be reordered, and open tabs are not restored after a restart.
+- The explorer does not watch for renames of a file open in a tab. A tab whose file disappears
+  turns red, and Save recreates the file at the old path.
 - The Developer and Shell directories are the launched project; only the consultant directory is
   configurable.
-- Notes creation, New Session and Resume dialogs are modal, so scripted runs block on them.
+- Notes creation, unsaved-changes, New Session and Resume dialogs are modal, so scripted runs
+  block on them.
 - Resume lists only the role's own working directory and cannot tell whether a conversation is
   open in another terminal.
 

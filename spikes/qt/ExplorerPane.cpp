@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ExplorerPane.h"
 
-#include <QComboBox>
+#include <QActionGroup>
+#include <QMenu>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -10,7 +11,8 @@
 #include <QFontMetrics>
 #include <QLabel>
 #include <QResizeEvent>
-#include <QPushButton>
+#include <QItemSelectionModel>
+#include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -76,14 +78,8 @@ bool ExplorerSortProxy::lessThan(const QModelIndex &l, const QModelIndex &r) con
 // Pane
 // --------------------------------------------------------------------------
 
-ExplorerPane::ExplorerPane(const QString &startDir, bool allowAboveStart, QWidget *parent)
-    : QWidget(parent), m_allowAbove(allowAboveStart) {
-    m_start = QFileInfo(startDir).canonicalFilePath();
-    if (m_start.isEmpty()) m_start = startDir;
-    m_current = m_start;
-
+ExplorerPane::ExplorerPane(QWidget *parent) : QWidget(parent) {
     m_model = new QFileSystemModel(this);
-    m_model->setRootPath(m_start);
     m_model->setReadOnly(true);
     m_proxy = new ExplorerSortProxy(this);
     m_proxy->setSourceModel(m_model);
@@ -97,37 +93,39 @@ ExplorerPane::ExplorerPane(const QString &startDir, bool allowAboveStart, QWidge
     m_tree->setAnimated(false);
     m_tree->setSortingEnabled(false);      // the proxy owns ordering
 
-    // Compact glyph buttons; the wording lives in the tooltips so the toolbar
-    // stops dictating a wide minimum for the whole pane.
-    m_parentBtn = new QPushButton(QStringLiteral("↑"));
-    auto *startBtn = new QPushButton(QStringLiteral("⌂"));
-    m_parentBtn->setToolTip(QStringLiteral("Parent directory. Does not change any terminal's cwd."));
-    startBtn->setToolTip(QStringLiteral("Back to the starting directory %1.\n"
-                                        "Does not change any terminal's cwd.").arg(m_start));
+    m_parentBtn = new QToolButton;
+    m_parentBtn->setText(QStringLiteral("↑"));
+    m_parentBtn->setToolTip(QStringLiteral("Parent folder. Does not change any terminal's cwd."));
+    m_parentBtn->setFocusPolicy(Qt::NoFocus);
 
-    m_sort = new QComboBox;
-    struct { const char *label; const char *full; const char *token; } kSorts[] = {
-        {"Name ↑",     "Name A to Z",                 "name_asc"},
-        {"Name ↓",     "Name Z to A",                 "name_desc"},
-        {"Modified ↓", "Modified, newest first",      "modified_newest"},
-        {"Modified ↑", "Modified, oldest first",      "modified_oldest"},
-        {"Size ↓",     "Size, largest first",         "size_largest"},
-        {"Size ↑",     "Size, smallest first",        "size_smallest"}};
+    // Sort is a small menu button rather than a combo box: the second row
+    // must keep Open and Send readable in a narrow pane.
+    m_sortBtn = new QToolButton;
+    m_sortBtn->setText(QStringLiteral("⇅"));
+    m_sortBtn->setPopupMode(QToolButton::InstantPopup);
+    m_sortBtn->setFocusPolicy(Qt::NoFocus);
+    auto *sortMenu = new QMenu(m_sortBtn);
+    m_sortGroup = new QActionGroup(this);
+    struct { const char *full; const char *token; } kSorts[] = {
+        {"Name A to Z",            "name_asc"},
+        {"Name Z to A",            "name_desc"},
+        {"Modified, newest first", "modified_newest"},
+        {"Modified, oldest first", "modified_oldest"},
+        {"Size, largest first",    "size_largest"},
+        {"Size, smallest first",   "size_smallest"}};
     for (const auto &k : kSorts) {
-        m_sort->addItem(QString::fromUtf8(k.label), QString::fromLatin1(k.token));
-        m_sort->setItemData(m_sort->count() - 1, QString::fromUtf8(k.full), Qt::ToolTipRole);
+        QAction *a = sortMenu->addAction(QString::fromUtf8(k.full));
+        a->setData(QString::fromLatin1(k.token));
+        a->setCheckable(true);
+        m_sortGroup->addAction(a);
     }
-    // Without this the closed combo reserves the width of its longest entry.
-    m_sort->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    m_sort->setMinimumContentsLength(6);
-    m_sort->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    m_sort->setToolTip(QStringLiteral("Sort order. Folders always come first."));
-
-    for (QWidget *w : QList<QWidget *>{m_parentBtn, startBtn, m_sort}) {
-        w->setFocusPolicy(Qt::NoFocus);
-        w->setMinimumWidth(0);
-    }
-    for (QPushButton *b : {m_parentBtn, startBtn}) b->setMaximumWidth(34);
+    m_sortBtn->setMenu(sortMenu);
+    connect(m_sortGroup, &QActionGroup::triggered, this, [this](QAction *a) {
+        const QString token = a->data().toString();
+        if (m_active >= 0) m_roots[m_active].sort = token;
+        showSort(token);
+    });
+    showSort(QStringLiteral("name_asc"));
 
     m_path = new QLabel;
     m_path->setObjectName(QStringLiteral("pathLabel"));
@@ -139,103 +137,209 @@ ExplorerPane::ExplorerPane(const QString &startDir, bool allowAboveStart, QWidge
     m_tree->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
     setMinimumWidth(0);
 
-    // Two compact rows: navigation, then area-specific file actions.
-    m_navRow = new QHBoxLayout;
-    m_navRow->setContentsMargins(0, 0, 0, 0);
-    m_navRow->setSpacing(3);
-    m_navRow->addWidget(m_parentBtn);
-    m_navRow->addWidget(startBtn);
-    m_navRow->addWidget(m_sort, 1);
+    // Row 1: root switch + Parent. Row 2: sort + the caller's file actions.
+    m_rootRow = new QHBoxLayout;
+    m_rootRow->setContentsMargins(0, 0, 0, 0);
+    m_rootRow->setSpacing(0);
+    m_rootRow->addStretch(0);
+    m_rootRow->addSpacing(4);
+    m_rootRow->addWidget(m_parentBtn);
+    m_parentBtn->setMinimumWidth(m_parentBtn->sizeHint().width());
 
     m_actionRow = new QHBoxLayout;
     m_actionRow->setContentsMargins(0, 0, 0, 0);
     m_actionRow->setSpacing(3);
+    m_actionRow->addStretch(0);
+    m_actionRow->addWidget(m_sortBtn);
 
     auto *v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(2);
-    v->addLayout(m_navRow);
+    v->addLayout(m_rootRow);
     v->addLayout(m_actionRow);
     v->addWidget(m_path);
     v->addWidget(m_tree, 1);
 
-    connect(m_parentBtn, &QPushButton::clicked, this, [this] {
-        navigateTo(QFileInfo(m_current).absolutePath());
-    });
-    connect(startBtn, &QPushButton::clicked, this, [this] { navigateTo(m_start); });
-    connect(m_sort, &QComboBox::currentTextChanged, this, [this] {
-        m_proxy->setMode(ExplorerSortProxy::modeFromToken(m_sort->currentData().toString()));
+    connect(m_parentBtn, &QToolButton::clicked, this, [this] {
+        if (m_active < 0) return;
+        navigateTo(QFileInfo(m_roots.at(m_active).current).absolutePath());
     });
     connect(m_tree, &QTreeView::doubleClicked, this, [this](const QModelIndex &i) {
         const QString p = m_model->filePath(m_proxy->mapToSource(i));
         if (QFileInfo(p).isDir()) return;          // the tree expands directories itself
         emit fileActivated(p);
     });
+}
 
-    navigateTo(m_start);
+int ExplorerPane::addRoot(const QString &key, const QString &label, const QString &shortLabel,
+                          const QString &startDir, bool allowAboveStart) {
+    Root r;
+    r.key = key;
+    r.label = label;
+    r.shortLabel = shortLabel;
+    r.start = QFileInfo(startDir).canonicalFilePath();
+    if (r.start.isEmpty()) r.start = startDir;
+    r.current = r.start;
+    r.sort = QStringLiteral("name_asc");
+    r.allowAbove = allowAboveStart;
+    r.button = new QToolButton;
+    r.button->setText(label);
+    r.button->setCheckable(true);
+    r.button->setFocusPolicy(Qt::NoFocus);
+    r.button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    r.button->setMinimumWidth(QFontMetrics(r.button->font()).horizontalAdvance(shortLabel) + 20);
+    r.button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    r.button->setToolTip(QStringLiteral("%1 root: %2\n"
+                                        "Click to show it again where you left it; click it while it is shown "
+                                        "to go back to the root.%3\n"
+                                        "Does not change any terminal's cwd.")
+                             .arg(label, r.start,
+                                  allowAboveStart ? QString()
+                                                  : QStringLiteral("\nParent stops at this root.")));
+    const int index = m_roots.size();
+    connect(r.button, &QToolButton::clicked, this, [this, index] {
+        if (index == m_active) {
+            m_roots.at(index).button->setChecked(true);   // a click toggles it; keep it shown as active
+            navigateTo(m_roots.at(index).start);
+            emit message(QStringLiteral("Files: back to the %1 root %2")
+                             .arg(m_roots.at(index).label, m_roots.at(index).start), QString());
+        } else {
+            setActiveRoot(index);
+        }
+    });
+    m_rootRow->insertWidget(index, r.button, 1);
+    m_roots << r;
+    if (m_active < 0) setActiveRoot(index);
+    fitRootLabels();
+    return index;
+}
+
+void ExplorerPane::setActiveRoot(int root) {
+    if (root < 0 || root >= m_roots.size()) return;
+    if (m_active >= 0 && m_active != root) m_roots[m_active].selected = selectedPath();
+    m_active = root;
+    for (int i = 0; i < m_roots.size(); ++i) m_roots[i].button->setChecked(i == root);
+    showSort(m_roots.at(root).sort);
+    navigateTo(m_roots.at(root).current);
+    // Back where it was left: same folder, same selected item.
+    const QString sel = m_roots.at(root).selected;
+    if (!sel.isEmpty() && sel.startsWith(m_roots.at(root).current + QLatin1Char('/'))) {
+        const QModelIndex i = m_proxy->mapFromSource(m_model->index(sel));
+        if (i.isValid()) {
+            m_tree->setCurrentIndex(i);
+            m_tree->scrollTo(i);
+        }
+    }
+    emit rootChanged(root);
+}
+
+int ExplorerPane::rootIndex(const QString &key) const {
+    for (int i = 0; i < m_roots.size(); ++i) if (m_roots.at(i).key == key) return i;
+    return -1;
+}
+QString ExplorerPane::rootKey(int r) const { return (r >= 0 && r < m_roots.size()) ? m_roots.at(r).key : QString(); }
+QString ExplorerPane::rootLabel(int r) const { return (r >= 0 && r < m_roots.size()) ? m_roots.at(r).label : QString(); }
+QString ExplorerPane::startDir(int r) const { return (r >= 0 && r < m_roots.size()) ? m_roots.at(r).start : QString(); }
+QString ExplorerPane::currentDir(int r) const { return (r >= 0 && r < m_roots.size()) ? m_roots.at(r).current : QString(); }
+QString ExplorerPane::sortToken(int r) const { return (r >= 0 && r < m_roots.size()) ? m_roots.at(r).sort : QString(); }
+
+void ExplorerPane::setCurrentDir(int root, const QString &path) {
+    if (root < 0 || root >= m_roots.size()) return;
+    if (root == m_active) { navigateTo(path); return; }
+    m_roots[root].current = path;          // checked against its boundary when shown
+}
+
+void ExplorerPane::setSortToken(int root, const QString &token) {
+    if (root < 0 || root >= m_roots.size()) return;
+    m_roots[root].sort = ExplorerSortProxy::tokenForMode(ExplorerSortProxy::modeFromToken(token));
+    if (root == m_active) setActiveRoot(root);
 }
 
 QString ExplorerPane::selectedPath() const {
     const QModelIndex i = m_tree->currentIndex();
-    if (!i.isValid()) return QString();
+    if (!i.isValid() || !m_tree->selectionModel()->isSelected(i)) return QString();
     return m_model->filePath(m_proxy->mapToSource(i));
 }
 
-QString ExplorerPane::sortToken() const { return m_sort->currentData().toString(); }
-
-void ExplorerPane::setSortToken(const QString &token) {
-    const int idx = m_sort->findData(ExplorerSortProxy::tokenForMode(
-        ExplorerSortProxy::modeFromToken(token)));
-    m_sort->setCurrentIndex(idx < 0 ? 0 : idx);
+void ExplorerPane::addActionWidget(QWidget *w) {
+    w->setFocusPolicy(Qt::NoFocus);
+    // Never narrower than its text: the pane gets a minimum width instead of
+    // eliding "Open" into "O...n".
+    w->setMinimumWidth(w->sizeHint().width());
+    w->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_actionRow->insertWidget(m_actionRow->count() - 2, w, 1);
 }
 
-void ExplorerPane::addToolButton(QPushButton *b) {
-    b->setFocusPolicy(Qt::NoFocus);
-    b->setMinimumWidth(0);
-    b->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    m_actionRow->addWidget(b, 1);
+void ExplorerPane::showSort(const QString &token) {
+    const auto mode = ExplorerSortProxy::modeFromToken(token);
+    const QString canonical = ExplorerSortProxy::tokenForMode(mode);
+    for (QAction *a : m_sortGroup->actions())
+        if (a->data().toString() == canonical) {
+            a->setChecked(true);
+            m_sortBtn->setToolTip(QStringLiteral("Sort: %1 (this root). Folders always come first.").arg(a->text()));
+        }
+    m_proxy->setMode(mode);
 }
 
 // Canonical comparison, so a symlink cannot step outside a bounded root.
-bool ExplorerPane::withinBoundary(const QString &canonical) const {
-    if (m_allowAbove) return true;
-    return canonical == m_start || canonical.startsWith(m_start + QLatin1Char('/'));
+bool ExplorerPane::usable(const QString &canonical, const Root &r) const {
+    const QFileInfo fi(canonical);
+    if (canonical.isEmpty() || !fi.isDir() || !fi.isReadable()) return false;
+    if (r.allowAbove) return true;
+    return canonical == r.start || canonical.startsWith(r.start + QLatin1Char('/'));
 }
 
-void ExplorerPane::setCurrentDir(const QString &path) { navigateTo(path); }
-
 void ExplorerPane::navigateTo(const QString &path) {
-    const QFileInfo fi(path);
-    const QString canonical = fi.canonicalFilePath();
-    if (canonical.isEmpty() || !fi.isDir() || !fi.isReadable() || !withinBoundary(canonical)) {
-        if (m_current != m_start) {
-            emit message(QStringLiteral("Cannot show %1 - returning to %2").arg(path, m_start),
-                         QStringLiteral("warn"));
-            navigateTo(m_start);
+    if (m_active < 0) return;
+    Root &r = m_roots[m_active];
+    QString canonical = QFileInfo(path).canonicalFilePath();
+    if (!usable(canonical, r)) {
+        emit message(QStringLiteral("Cannot show %1 in the %2 root - showing %3")
+                         .arg(path, r.label, r.start), QStringLiteral("warn"));
+        canonical = QFileInfo(r.start).canonicalFilePath();
+        if (!usable(canonical, r)) {
+            emit message(QStringLiteral("The %1 root %2 is not available").arg(r.label, r.start),
+                         QStringLiteral("error"));
+            return;
         }
-        return;
     }
-    m_current = canonical;
+    r.current = canonical;
     m_model->setRootPath(canonical);
     m_tree->setRootIndex(m_proxy->mapFromSource(m_model->index(canonical)));
+    m_tree->selectionModel()->clearSelection();
+    m_tree->setCurrentIndex(QModelIndex());
     refreshToolbar();
 }
 
 void ExplorerPane::resizeEvent(QResizeEvent *e) {
     QWidget::resizeEvent(e);
     updatePathLabel();
+    fitRootLabels();
+}
+
+// Full root names when they fit, short ones when the pane is narrow.
+void ExplorerPane::fitRootLabels() {
+    if (m_roots.isEmpty()) return;
+    const QFontMetrics fm(font());
+    int needed = m_parentBtn->sizeHint().width() + 4;
+    for (const Root &r : m_roots) needed += fm.horizontalAdvance(r.label) + 18;
+    const bool full = width() >= needed;
+    for (const Root &r : m_roots) r.button->setText(full ? r.label : r.shortLabel);
 }
 
 // Elide from the left: the tail of a path is the useful part when narrow.
 void ExplorerPane::updatePathLabel() {
+    if (m_active < 0) return;
+    const QString cur = m_roots.at(m_active).current;
     const int avail = qMax(20, m_path->width() - 8);
-    m_path->setText(m_path->fontMetrics().elidedText(m_current, Qt::ElideLeft, avail));
-    m_path->setToolTip(m_current);
+    m_path->setText(m_path->fontMetrics().elidedText(cur, Qt::ElideLeft, avail));
+    m_path->setToolTip(cur);
 }
 
 void ExplorerPane::refreshToolbar() {
     updatePathLabel();
-    const bool atRoot = m_current == QLatin1String("/");
-    const bool atBoundary = !m_allowAbove && m_current == m_start;
+    const Root &r = m_roots.at(m_active);
+    const bool atRoot = r.current == QLatin1String("/");
+    const bool atBoundary = !r.allowAbove && r.current == r.start;
     m_parentBtn->setEnabled(!atRoot && !atBoundary);
 }
