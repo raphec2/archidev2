@@ -563,6 +563,24 @@ and shell, so every inserted byte could be compared. Covered:
 - close prompts;
 - the layout at 1100×700 and at the 1043×640 minimum.
 
+After the merge to `main` (2026-11-13), the rebuilt `build/qt-spike` binary was rechecked on a
+separate X display. Consultant ran **real Codex 0.167.2** (`--no-alt-screen`, input traced with
+strace); Developer and Shell ran recorders. Covered:
+- routing: an editor selection to Codex (one bracketed paste, byte-exact, shown, no Enter);
+  Developer → Notes while a code tab was active; editor → a scrolled-up Developer (byte-exact,
+  view back at the prompt);
+- File actions: a 22 KB file into Developer after the confirmation (byte-exact), a quoted path to
+  Shell, Copy file path, refusals for 300 KB and binary files, and contents disabled for folders;
+- copy and paste: Ctrl+C with a selection in Codex copied without interrupting it; Ctrl+V,
+  Ctrl+Shift+V and right-click Paste delivered clipboard text to Codex (bracketed) and Developer
+  without Enter; right-click Copy selection in Developer; Ctrl+C with no selection sent `0x03`
+  to both;
+- the offscreen routing self-test.
+
+Codex's own startup "Update available" dialog was open for the first insert. Codex did not read
+the text while the dialog was up, and the text never reached its prompt. The status line flagged
+this with the "has not redrawn" warning. After the dialog was skipped, the same insert worked.
+
 ## Needs your eyes
 
 The three-terminal layout and proportions; the dark theme and whether the active-surface border
@@ -587,6 +605,9 @@ mouse or touchpad, and Resume… into a real conversation in each role.
   configurable.
 - Notes creation, unsaved-changes, New Session and Resume dialogs are modal, so scripted runs
   block on them.
+- Text inserted while a CLI shows its own dialog (for example Codex's update prompt) can be
+  dropped by that CLI. ArchiDev2 cannot see the dialog. It warns when the pane does not redraw,
+  but a CLI that redraws anyway would not trigger the warning.
 - Resume lists only the role's own working directory and cannot tell whether a conversation is
   open in another terminal.
 
